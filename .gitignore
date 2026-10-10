@@ -1,0 +1,23 @@
+# build output
+bin/
+obj/
+publish/
+*.user
+.vs/
+
+# mail data, IDs and conversion output - never commit
+*.nsf
+*.ntf
+*.pst
+*.ost
+*.id
+*.eml
+*_work/
+.demo/
+unresolved_names.txt
+summary.txt
+export_log.csv
+manifest.jsonl
+notes.ini
+*.nsf2pst.bak
+*.log
