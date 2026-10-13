@@ -102,6 +102,38 @@ internal sealed partial class PstStore
         return missing;
     }
 
+    /// <summary>Attachments stored by value -> files dir\1.bin, 2.bin ...; returns [{path, name}] (other kinds are counted in skipped).</summary>
+    List<Dictionary<string, string>> SaveAttachments(IMessage msg, string dir, out int skipped)
+    {
+        var result = new List<Dictionary<string, string>>();
+        skipped = 0;
+        if (msg.GetAttachmentTable(MAPI_UNICODE, out IMAPITable at) < 0) return result;
+        List<Dictionary<uint, object?>> rows;
+        try { rows = QueryAll(at, PR_ATTACH_NUM, PR_ATTACH_METHOD); }
+        finally { Marshal.ReleaseComObject(at); }
+        foreach (var r in rows)
+        {
+            if (r.GetValueOrDefault(PR_ATTACH_NUM) is not uint num) continue;
+            if (!(r.GetValueOrDefault(PR_ATTACH_METHOD) is uint m && m == 1)) { skipped++; continue; }
+            Check(msg.OpenAttach(num, IntPtr.Zero, 0, out IntPtr pa), "OpenAttach");
+            var att = (IMAPIProp)Marshal.GetObjectForIUnknown(pa);
+            Marshal.Release(pa);
+            try
+            {
+                var ap = Get(t => { int hr = att.GetProps(t, MAPI_UNICODE, out uint c, out IntPtr x); return (hr, c, x); }, PR_ATTACH_LONG_FILENAME, PR_ATTACH_FILENAME, 0x3001001F);
+                string name = ap.GetValueOrDefault(PR_ATTACH_LONG_FILENAME) as string ?? ap.GetValueOrDefault(PR_ATTACH_FILENAME) as string
+                              ?? ap.GetValueOrDefault(0x3001001Fu) as string ?? $"attachment{num + 1}";
+                Directory.CreateDirectory(dir);
+                string path = Path.Combine(dir, (result.Count + 1) + ".bin");
+                File.WriteAllBytes(path, ReadBinaryStream(att, PR_ATTACH_DATA_BIN));
+                result.Add(new Dictionary<string, string> { ["path"] = path, ["name"] = name });
+            }
+            catch { skipped++; }
+            finally { Marshal.ReleaseComObject(att); }
+        }
+        return result;
+    }
+
     /// <summary>Reads a binary property through IStream (works for large values that GetProps does not return).</summary>
     static byte[] ReadBinaryStream(IMAPIProp obj, uint tag)
     {

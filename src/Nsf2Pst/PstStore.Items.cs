@@ -86,7 +86,7 @@ internal sealed partial class PstStore
         finally { Marshal.ReleaseComObject(inbox); }
     }
 
-    void SaveNew(string folderPath, List<(uint, object)> props)
+    void SaveNew(string folderPath, List<(uint, object)> props, IReadOnlyList<(string path, string name)>? attachments = null)
     {
         IMAPIFolder folder = Folder(folderPath);
         Check(folder.CreateMessage(IntPtr.Zero, 0, out IMessage msg), "CreateMessage");
@@ -95,9 +95,53 @@ internal sealed partial class PstStore
             using var block = new Block(props);
             Check(msg.SetProps(block.Count, block.Ptr, out IntPtr problems), "SetProps");
             if (problems != IntPtr.Zero) Native.MAPIFreeBuffer(problems);
+            foreach (var (path, name) in attachments ?? Array.Empty<(string, string)>()) AddAttachment(msg, path, name);
             Check(msg.SaveChanges(0), "SaveChanges");
         }
         finally { Marshal.ReleaseComObject(msg); }
+    }
+
+    /// <summary>Adds a file as an attachment stored by value (the data is streamed, so large files are fine).</summary>
+    static void AddAttachment(IMessage msg, string path, string name)
+    {
+        Check(msg.CreateAttach(IntPtr.Zero, 0, out _, out IntPtr pa), "CreateAttach");
+        var att = (IMAPIProp)Marshal.GetObjectForIUnknown(pa);
+        Marshal.Release(pa);
+        try
+        {
+            using (var b = new Block(new List<(uint, object)>
+            {
+                (0x37050003, 1),                                  // PR_ATTACH_METHOD = ATTACH_BY_VALUE
+                (0x3707001F, name), (0x3704001F, name),           // PR_ATTACH_LONG_FILENAME, PR_ATTACH_FILENAME
+                (0x3001001F, name),                               // PR_DISPLAY_NAME
+                (0x3703001F, Path.GetExtension(name)),            // PR_ATTACH_EXTENSION
+                (0x370B0003, -1),                                 // PR_RENDERING_POSITION: not in the body text
+            }))
+            {
+                Check(att.SetProps(b.Count, b.Ptr, out IntPtr prob), "SetProps(attachment)");
+                if (prob != IntPtr.Zero) Native.MAPIFreeBuffer(prob);
+            }
+            IntPtr piid = Marshal.AllocHGlobal(16);
+            try
+            {
+                Marshal.Copy(new Guid("0000000C-0000-0000-C000-000000000046").ToByteArray(), 0, piid, 16);   // IID_IStream
+                Check(att.OpenProperty(0x37010102, piid, 0x00000002 | 0x00001000, 0x2 | 0x1, out IntPtr ps), "OpenProperty(attachment data)");   // STGM_READWRITE|STGM_CREATE, MAPI_CREATE|MAPI_MODIFY
+                var stm = (System.Runtime.InteropServices.ComTypes.IStream)Marshal.GetObjectForIUnknown(ps);
+                Marshal.Release(ps);
+                try
+                {
+                    using var fs = File.OpenRead(path);
+                    var buf = new byte[65536];
+                    int n;
+                    while ((n = fs.Read(buf, 0, buf.Length)) > 0) stm.Write(buf, n, IntPtr.Zero);
+                    stm.Commit(0);
+                }
+                finally { Marshal.ReleaseComObject(stm); }
+            }
+            finally { Marshal.FreeHGlobal(piid); }
+            Check(att.SaveChanges(0), "SaveChanges(attachment)");
+        }
+        finally { Marshal.ReleaseComObject(att); }
     }
 
     static void AddText(List<(uint, object)> props, uint tag, string? value)
@@ -166,7 +210,7 @@ internal sealed partial class PstStore
 
     /// <summary>Creates a single (non-recurring) Outlook appointment (IPM.Appointment).</summary>
     public void ImportAppointment(string folderPath, string subject, DateTimeOffset start, DateTimeOffset end, bool allDay,
-        string? location, string? body, int? reminderMinutes, bool tentative = false)
+        string? location, string? body, int? reminderMinutes, bool tentative = false, IReadOnlyList<(string path, string name)>? attachments = null)
     {
         if (end < start) end = start;
         int minutes = (int)Math.Round((end - start).TotalMinutes);
@@ -198,6 +242,6 @@ internal sealed partial class PstStore
             p.Add((Named(PSETID_Common, 0x8502, Tags.PT_SYSTIME), start));                   // ReminderTime
             p.Add((Named(PSETID_Common, 0x8560, Tags.PT_SYSTIME), start.AddMinutes(-r)));   // ReminderSignalTime
         }
-        SaveNew(folderPath, p);
+        SaveNew(folderPath, p, attachments);
     }
 }

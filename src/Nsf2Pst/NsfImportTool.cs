@@ -145,9 +145,18 @@ internal static class NsfImportTool
                     if (type == "appointment")
                     {
                         // the Notes calendar API stores the entry like the Notes client does (repeat rules, alarm, busy time)
-                        CreateCalendar(cdb, EventICalendar(r));
+                        string uid = Guid.NewGuid().ToString("N") + "-nsf2pst";
+                        CreateCalendar(cdb, EventICalendar(r, uid));
                         appointments++; ok++;
-                        log.WriteLine(Csv((i + 1).ToString(), "", folder, type, subject));
+                        string status = type;
+                        var atts = PstTool.Attachments(r);
+                        if (atts.Count > 0)
+                        {
+                            // the entry exists either way; a failure here only loses its attachments, and is reported
+                            try { AttachToEntry(session, db, uid, atts); status += $" ({atts.Count} attachment(s))"; }
+                            catch (Exception ex) { failed++; status += " - attachments FAILED: " + ex.Message; Console.WriteLine($"FAILED line {i + 1} (attachments): {ex.Message}"); }
+                        }
+                        log.WriteLine(Csv((i + 1).ToString(), "", folder, status, subject));
                         continue;
                     }
                     if (type == "task")
@@ -256,19 +265,52 @@ internal static class NsfImportTool
     static string Utc(DateTimeOffset d) => d.UtcDateTime.ToString("yyyyMMdd'T'HHmmss'Z'");
     static string? Text(JsonElement r, string name) => r.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String && v.GetString()!.Length > 0 ? v.GetString() : null;
 
-    static StringBuilder Begin(string component)
+    static StringBuilder Begin(string component, string uid)
     {
         var sb = new StringBuilder();
         sb.Append("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Nsf2Pst//PST to NSF//EN\r\n");
-        sb.Append($"BEGIN:{component}\r\nUID:{Guid.NewGuid():N}-nsf2pst\r\nDTSTAMP:{Utc(DateTimeOffset.UtcNow)}\r\n");
+        sb.Append($"BEGIN:{component}\r\nUID:{uid}\r\nDTSTAMP:{Utc(DateTimeOffset.UtcNow)}\r\n");
         return sb;
+    }
+
+    /// <summary>CalCreateEntry takes no attachments: they are added to the new entry's rich text Body afterwards. The entry
+    /// is found by the iCalendar UID Notes keeps in $ICAL_UID (the main document, not the instance children).</summary>
+    static void AttachToEntry(dynamic session, dynamic db, string uid, List<(string path, string name)> atts)
+    {
+        // Search needs a cutoff date (it cannot take an empty value through COM): the entry was created just now
+        // "Today" keyword: independent of the system's date format. A cutoff of today or yesterday found nothing in tests,
+        // one far in the past works.
+        dynamic since = session.CreateDateTime("Today");
+        since.AdjustYear(-30);
+        dynamic dc = db.Search($"$ICAL_UID = \"{uid}\" & !@IsResponseDoc", since, 0);
+        dynamic? doc = dc.Count > 0 ? dc.GetFirstDocument() : null;
+        if (doc == null) throw new InvalidOperationException("calendar entry created, but not found to add its attachments");
+        dynamic body = doc.GetFirstItem("Body");
+        if (body == null || (int)body.Type != 1) body = doc.CreateRichTextItem("Body");
+        string tmp = Path.Combine(Path.GetTempPath(), "nsf2pst_att_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            foreach (var (path, name) in atts)
+            {
+                // the attachment takes the file's name: copy it under its real name first
+                string dir = Path.Combine(tmp, Guid.NewGuid().ToString("N")[..8]);
+                Directory.CreateDirectory(dir);
+                string safe = string.Concat(name.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
+                if (safe.Length > 150) safe = safe[..(150 - Path.GetExtension(safe).Length)] + Path.GetExtension(safe);   // file name limit
+                string named = Path.Combine(dir, safe);
+                File.Copy(path, named);
+                body.EmbedObject(1454, "", named);   // EMBED_ATTACHMENT
+            }
+            doc.Save(true, false);
+        }
+        finally { try { Directory.Delete(tmp, true); } catch { } }
     }
 
     /// <summary>Appointment manifest line -> VEVENT. No ORGANIZER / ATTENDEE lines: creating the entry must never send
     /// invitations; the attendees are kept as text in the description (as the NSF -> PST direction does).</summary>
-    static string EventICalendar(JsonElement r)
+    static string EventICalendar(JsonElement r, string uid)
     {
-        var sb = Begin("VEVENT");
+        var sb = Begin("VEVENT", uid);
         sb.Append($"SUMMARY:{Esc(Text(r, "subject") ?? "")}\r\n");
         DateTimeOffset start = r.GetProperty("start").GetDateTimeOffset(), end = r.TryGetProperty("end", out var e) ? e.GetDateTimeOffset() : start;
         bool allDay = r.TryGetProperty("allDay", out var ad) && ad.GetBoolean();

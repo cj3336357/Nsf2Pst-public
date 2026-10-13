@@ -174,6 +174,8 @@ internal static class ExportTool
                 try
                 {
                     List<Dictionary<string, object>> items = Appointments(doc, subject);
+                    var atts = ExtractAttachments(session, doc, Path.Combine(outDir, "att", id.ToString("X")));
+                    if (atts.Count > 0) foreach (var a in items) a["attachments"] = atts;
                     foreach (var a in items) manifest.WriteLine(JsonSerializer.Serialize(a));
                     appointments++; appointmentItems += items.Count;
                     log.WriteLine(Csv(id.ToString("X"), unid, form, "appointment", "", "", $"@Calendar x{items.Count}", subject));
@@ -394,6 +396,24 @@ internal static class ExportTool
             if (bodyParts.Count > 0) a["body"] = string.Join("\r\n", bodyParts);
             if (reminder.HasValue) a["reminder"] = reminder.Value;
             result.Add(a);
+        }
+        return result;
+    }
+
+    /// <summary>Attachments of a calendar entry -> files dir\1.bin, 2.bin ... (short names: Notes attachment names can be
+    /// longer than a path allows); the manifest keeps the real names.</summary>
+    static List<Dictionary<string, string>> ExtractAttachments(dynamic session, dynamic doc, string dir)
+    {
+        var result = new List<Dictionary<string, string>>();
+        List<(string name, long size)> list = NotesAttachments(session, doc);
+        foreach (var (name, _) in list)
+        {
+            dynamic? obj = doc.GetAttachment(name);
+            if (obj == null) continue;
+            Directory.CreateDirectory(dir);
+            string path = Path.Combine(dir, (result.Count + 1) + ".bin");
+            obj.ExtractFile(path);
+            result.Add(new Dictionary<string, string> { ["path"] = path, ["name"] = name });
         }
         return result;
     }

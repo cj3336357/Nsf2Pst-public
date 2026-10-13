@@ -24,7 +24,7 @@ switched in the title area). The screenshots show a generated sample mailbox wit
 | Read / unread | Taken from the Notes unread table of the **mailbox owner** (not of the ID that runs the tool) |
 | Unicode | Subjects and attachment names are taken from Notes as Unicode; mail bodies that Notes converts with a lossy charset (e.g. ISO-2022-JP for Traditional Chinese) are rebuilt from the Notes text |
 | Contacts | Notes contacts (Person documents) become Outlook contacts: names, e-mail, company, phones, address; other fields go into the notes |
-| Calendar | Appointments, all-day events, meetings, reminders and anniversaries; repeating entries become one appointment per occurrence; unanswered invitations that Notes shows in its calendar get a *tentative* appointment |
+| Calendar | Appointments, all-day events, meetings, reminders and anniversaries, with their attachments; repeating entries become one appointment per occurrence; unanswered invitations that Notes shows in its calendar get a *tentative* appointment. Calendar entries filed in a mail folder (e.g. the Inbox) go to the Outlook calendar only |
 | Encrypted mail | Decrypted with the mailbox owner's Notes ID (optional ID file + password); body and attachments are rebuilt from the decrypted document |
 | Addresses | Internal Notes names (`Alex_Chan/Sales/ExampleCorp`) are replaced with SMTP addresses so that replies work. The name -> address table is learned from the mail file itself (recipient lists, `INetFrom`, contacts); an optional Domino directory (`names.nsf`) fills the gaps |
 | Verification | After each run the number of items and unread items per folder is compared between the NSF and the PST; a numbers-only `summary.txt` can be shared without exposing mail content |
@@ -100,7 +100,7 @@ template (`mail12.ntf`, or the newest `mailNN.ntf` in the Notes data folder) and
 | Exchange addresses | Mail from Exchange accounts stores sender / recipients as X.500 (`EX`) addresses; the SMTP addresses the PST keeps next to them are used instead |
 | Meeting requests, reports | Messages Outlook's converter refuses (e.g. meeting requests, delivery reports) are rebuilt from their MAPI properties: subject, sender, recipients, date, body, the meeting's time and place, attachments |
 | Contacts | Outlook contacts -> Notes contacts (Person documents): names, e-mail, company, phones, business address, notes. Contact groups -> Notes personal groups (members as Internet addresses) |
-| Calendar | Appointments, all-day and multi-day events, reminders, private entries and repeating appointments (daily / weekly / monthly incl. "2nd Tuesday" and "last day" / yearly patterns, deleted occurrences, no end date), created with the Notes calendar API (`CalCreateEntry`). Attendees are kept as text in the description, so no invitations are sent. Changed single occurrences of a series keep the series' time; a series without an end date is expanded by Notes for about 10 years |
+| Calendar | Appointments, all-day and multi-day events, reminders, private entries and repeating appointments (daily / weekly / monthly incl. "2nd Tuesday" and "last day" / yearly patterns, deleted occurrences, no end date), created with the Notes calendar API (`CalCreateEntry`); attachments of an appointment are added to the Notes entry. Attendees are kept as text in the description, so no invitations are sent. Changed single occurrences of a series keep the series' time; a series without an end date is expanded by Notes for about 10 years |
 | Tasks | Outlook tasks -> personal Notes to dos (start, due, completed, progress, importance) |
 | Notes, journal | Sticky notes and journal entries are kept as documents in a folder of the same name |
 | Verification | Items and unread items per folder, PST vs NSF, in `summary.txt` / `summary.html` like the other direction |
@@ -142,6 +142,8 @@ report.
 - Meeting attendees are written into the appointment body, not as Outlook meeting attendees.
 - Rebuilt bodies (only for mail Notes converts lossily) are plain text: tables and colours are lost.
 - NSF -> PST does not convert: mail rules, signature, out-of-office message, contact groups, to-dos, Notes categories.
+  Documents that are in no view at all, such as the `ILNT_Appointment` copies Notes keeps of Internet invitations, are
+  skipped (they are counted under "skipped forms" in the log).
 - No resume / incremental mode: an interrupted run starts again with a new PST.
 - Disk space: the work folder holds every mail as an EML file, so allow free space of about 2.5 times the mailbox
   size next to the output file. Tested up to 18,000 mails and a 2 GB PST (PST -> NSF: about 2 minutes, under 300 MB

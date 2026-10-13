@@ -58,7 +58,7 @@ internal static class PstTool
                             r.TryGetProperty("location", out var lo) ? lo.GetString() : null,
                             r.TryGetProperty("body", out var bo) ? bo.GetString() : null,
                             r.TryGetProperty("reminder", out var rm) && rm.ValueKind == JsonValueKind.Number ? rm.GetInt32() : null,
-                            r.TryGetProperty("tentative", out var te) && te.GetBoolean());
+                            r.TryGetProperty("tentative", out var te) && te.GetBoolean(), Attachments(r));
                         ok++;
                         continue;
                     }
@@ -128,7 +128,7 @@ internal static class PstTool
                     }, (subject, ex) => Fail("IPM.Contact", subject, ex));
                     break;
                 case "calendar":
-                    store.ExportAppointments(f, item =>
+                    store.ExportAppointments(f, Path.Combine(outDir, "att"), item =>
                     {
                         Line(item);
                         bool rep = item.ContainsKey("rrule");
@@ -167,6 +167,12 @@ internal static class PstTool
         File.WriteAllText(Path.Combine(outDir, "address_stats.txt"), $"{exFixed}\t0\t0");
         return failed == 0 ? 0 : 1;
     }
+
+    /// <summary>Manifest "attachments": [{ "path": file, "name": attachment name }] (calendar entries).</summary>
+    internal static List<(string path, string name)> Attachments(JsonElement r) =>
+        r.TryGetProperty("attachments", out var a) && a.ValueKind == JsonValueKind.Array
+            ? a.EnumerateArray().Select(x => (x.GetProperty("path").GetString() ?? "", x.GetProperty("name").GetString() ?? "")).Where(x => File.Exists(x.Item1)).ToList()
+            : new List<(string, string)>();
 
     /// <summary>Clear reasons instead of MAPI error codes: the file is in use (Outlook keeps the PSTs of its profile
     /// locked) or is not a PST at all. Null when the file looks usable.</summary>

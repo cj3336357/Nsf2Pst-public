@@ -309,8 +309,9 @@ internal sealed partial class PstStore
 
     /// <summary>Outlook appointment -> manifest values: subject, start, end, allDay, location, body, reminder, tentative,
     /// rrule / exdates for repeating appointments (null when the pattern is not supported: then it stays a single entry).</summary>
-    public void ExportAppointments(PstFolder f, Action<Dictionary<string, object?>> onItem, Action<string, Exception> onError)
+    public void ExportAppointments(PstFolder f, string attDir, Action<Dictionary<string, object?>> onItem, Action<string, Exception> onError)
     {
+        int seq = 0;
         uint start = Named(PSETID_Appointment, 0x820D, Tags.PT_SYSTIME), end = Named(PSETID_Appointment, 0x820E, Tags.PT_SYSTIME);
         uint allDay = Named(PSETID_Appointment, 0x8215, Tags.PT_BOOLEAN), location = Named(PSETID_Appointment, 0x8208, Tags.PT_UNICODE);
         uint busy = Named(PSETID_Appointment, 0x8205, Tags.PT_LONG), recurring = Named(PSETID_Appointment, 0x8223, Tags.PT_BOOLEAN);
@@ -348,6 +349,9 @@ internal sealed partial class PstStore
                     if (rec != null) { item["rrule"] = rec.Value.rrule; item["exdates"] = rec.Value.exdates; item["recurStartOffset"] = rec.Value.startOffset; }
                     else item["recurrenceNote"] = "unsupported pattern";
                 }
+                var atts = SaveAttachments(msg, Path.Combine(attDir, "cal" + (++seq) + "_" + Guid.NewGuid().ToString("N")[..6]), out int skippedAtt);
+                if (atts.Count > 0) item["attachments"] = atts;
+                if (skippedAtt > 0) item["attachmentsSkipped"] = skippedAtt;
                 onItem(item);
             },
             (r, ex) => onError(r.GetValueOrDefault(Tags.PR_SUBJECT_W) as string ?? "", ex));

@@ -99,7 +99,17 @@ internal sealed partial class PstStore
         meet.Add((A(0x823C, Tags.PT_UNICODE), "陳大文"));
         meet.Add((0x0042001F, "Alex Chan"));
         meet.Add((Named(PSETID_Common, 0x8503, Tags.PT_BOOLEAN), true)); meet.Add((Named(PSETID_Common, 0x8501, Tags.PT_LONG), 30));
-        SaveNew("@Calendar", meet);
+        // two attachments on the meeting: an agenda with a Chinese name and a 600 KB binary
+        string tmp = Path.Combine(Path.GetTempPath(), "nsf2pst_uat_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tmp);
+        try
+        {
+            string agenda = Path.Combine(tmp, "a.txt"), data = Path.Combine(tmp, "b.bin");
+            File.WriteAllText(agenda, "季度檢討議程：一、業績；二、預算；三、其他。", new System.Text.UTF8Encoding(true));
+            var bytes = new byte[600 * 1024]; new Random(11).NextBytes(bytes); File.WriteAllBytes(data, bytes);
+            SaveNew("@Calendar", meet, new[] { (agenda, "季度檢討議程 (第二季).txt"), (data, "簡報資料.bin") });
+        }
+        finally { Directory.Delete(tmp, true); }
 
         // tasks: completed, undated with high importance
         IMAPIFolder tasks = SpecialFolder(0x36D4, "IPF.Task", "工作", "Tasks");
