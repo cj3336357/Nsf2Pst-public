@@ -64,7 +64,13 @@ Start `Nsf2Pst.exe` without arguments. Drop an `.nsf` file on the window or pres
 4. Press **Start** (or Enter). The window shows the three steps (export, write PST, verify), the percentage and an
    estimate of the remaining time; the taskbar button shows the progress too. At the end it shows the counts and a
    per-folder check. The work folder `<pst name>_work` next to the PST holds the per-document log
-   (`export_log.csv`), `summary.txt` and `unresolved_names.txt`.
+   (`export_log.csv`), `summary.txt`, the visual report `summary.html` and `unresolved_names.txt`.
+
+   `summary.html` is a single self-contained page (no scripts, no external files, light / dark) with the same numbers
+   as `summary.txt`: totals, what the NSF contained, address resolution and a NSF-vs-PST bar per folder. Like
+   `summary.txt` it contains no mail content, and folder names are hidden when that option is on.
+
+   <img src="docs/report.png" alt="Visual report summary.html" width="560">
 
 ### Command line
 

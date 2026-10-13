@@ -1,4 +1,4 @@
-// Main window: pick the NSF and the PST, run export (Notes) then import (PST) as child processes of this exe,
+﻿// Main window: pick the NSF and the PST, run export (Notes) then import (PST) as child processes of this exe,
 // show progress and the verification summary (numbers only, written to <work>\summary.txt).
 // Three views in one window: Setup -> Converting -> Done. Traditional Chinese / English, light / dark theme.
 using System.Diagnostics;
@@ -36,7 +36,7 @@ internal sealed class MainForm : Form
     readonly CheckBox chkAnon = new() { Text = L("摘要隱藏資料夾名稱（方便對外提供）", "Hide folder names in the summary (safe to share)"), AutoSize = true };
     readonly Pill btnStart = new(L("開始轉換", "Start conversion"), primary: true, icon: Ico.Forward, iconAfter: true), btnStop = new(L("停止", "Stop"), icon: Ico.Stop);
     readonly Pill btnOpenOut = new(L("開啟 PST 位置", "Show PST in folder"), primary: true, icon: Ico.Folder), btnOpenLog = new(L("逐封記錄", "Message log"), icon: Ico.Document);
-    readonly Pill btnSummary = new(L("摘要檔", "Summary"), icon: Ico.List), btnAgain = new(L("轉換另一個郵箱", "Convert another mailbox"), icon: Ico.Refresh);
+    readonly Pill btnSummary = new(L("圖表報告", "Visual report"), icon: Ico.Chart), btnAgain = new(L("轉換另一個郵箱", "Convert another mailbox"), icon: Ico.Refresh);
     readonly Pill btnNsf = new(L("瀏覽檔案", "Browse files"), small: true), btnPst = new(L("更改", "Change"), small: true),
                   btnId = new(L("瀏覽", "Browse"), small: true), btnDir = new(L("瀏覽", "Browse"), small: true);
     readonly Pill btnLang = new(En ? "中文" : "English", small: true, icon: Ico.Globe), btnTheme = new("", small: true, icon: Th.Dark ? Ico.Sun : Ico.Moon);
@@ -66,6 +66,9 @@ internal sealed class MainForm : Form
     readonly System.Windows.Forms.Timer clock = new() { Interval = 1000 };
     DateTime runStart;
     List<(string name, int exp, int pst, int expU, int pstU, bool ok)> folderRows = new();
+    sealed record Stats(int Docs, int Mails, int Contacts, int Calendar, int Invites, int Encrypted, int Skipped, int Failed, int Unread,
+                        double Seconds, long NsfSize, long PstSize, int AddrOk, int AddrBad, List<(string reason, int count)> Fails);
+    Stats? report;
     bool envOk = true;
 
     static float k = 1;                       // DPI scale
@@ -116,7 +119,7 @@ internal sealed class MainForm : Form
         btnStop.Click += (_, _) => StopChild();
         btnOpenOut.Click += (_, _) => { if (File.Exists(txtPst.Text)) Process.Start("explorer.exe", $"/select,\"{txtPst.Text}\""); };
         btnOpenLog.Click += (_, _) => OpenFile(Path.Combine(workDir, "export_log.csv"));
-        btnSummary.Click += (_, _) => OpenFile(Path.Combine(workDir, "summary.txt"));
+        btnSummary.Click += (_, _) => OpenFile(Path.Combine(workDir, "summary.html"));
         btnAgain.Click += (_, _) => { txtNsf.Text = ""; txtPst.Text = ""; ShowView(viewSetup); SetStatus(L("請選擇 NSF 檔案。", "Choose an NSF file.")); Taskbar.Set(Handle, 0, 0); };
         btnLang.Click += (_, _) => Rebuild(lang: En ? "zh" : "en");
         btnTheme.Click += (_, _) => Rebuild(theme: Th.Dark ? "light" : "dark");
@@ -170,8 +173,8 @@ internal sealed class MainForm : Form
     {
         var bar = new Panel { Dock = DockStyle.Top, Height = S(68), BackColor = Th.Surface };
         bar.Paint += (_, e) => { using var p = new Pen(Th.Line); e.Graphics.DrawLine(p, 0, bar.Height - 1, bar.Width, bar.Height - 1); };
-        var logo = new IconBadge(Ico.Mail) { Size = new Size(S(38), S(38)), Location = new Point(S(24), S(15)) };
-        var title = new Label { Text = "Nsf2Pst", Font = Th.Num(15f), ForeColor = Th.Text, AutoSize = true, Location = new Point(S(74), S(12)), BackColor = Th.Surface };
+        var logo = new IconBadge(Ico.Mail, badge: true) { Size = new Size(S(40), S(40)), Location = new Point(S(24), S(14)) };
+        var title = new Wordmark { Location = new Point(S(76), S(11)), BackColor = Th.Surface };
         var sub = new Label { Text = L("Notes 郵箱 (NSF) 轉 Outlook PST", "Notes mailbox (NSF) to Outlook PST"), Font = Th.Ui(9f), ForeColor = Th.Muted, AutoSize = true, Location = new Point(S(76), S(40)), BackColor = Th.Surface };
         lblEnv.AutoSize = true; lblEnv.Font = Th.Ui(9f); lblEnv.ForeColor = Th.Muted; lblEnv.BackColor = Th.Surface; lblEnv.Text = L("檢查環境中 ...", "Checking environment ...");
         bar.Controls.AddRange(new Control[] { logo, title, sub, lblEnv, btnLang, btnTheme });
@@ -606,11 +609,12 @@ internal sealed class MainForm : Form
             await RunChild(new List<string> { "counts", pst }, 950, 1000, counts);
             var summary = BuildSummary(nsf, pst, counts, (DateTime.Now - runStart).TotalSeconds, chkAnon.Checked, out allOk);
             File.WriteAllLines(Path.Combine(workDir, "summary.txt"), summary, new UTF8Encoding(true));
+            try { File.WriteAllText(Path.Combine(workDir, "summary.html"), ReportHtml(allOk), new UTF8Encoding(false)); } catch (Exception ex) { Log("summary.html: " + ex.Message); }
             Log("");
             foreach (var l in summary) Log(l);
             UpdateTiles(summary);
             Log("");
-            Log(L("摘要檔（只有數字，可以對外提供）：", "Summary file (numbers only, safe to share): ") + Path.Combine(workDir, "summary.txt"));
+            Log(L("摘要檔（只有數字，可以對外提供）：", "Summary files (numbers only, safe to share): ") + Path.Combine(workDir, "summary.txt") + " / summary.html");
             progress.Value = 1000;
             stepper.Current = 3;
             if (allOk) SetStatus(L("完成 ✓ 所有 folder 數量核對正確。", "Done ✓ All folder counts match."), Tone.Ok);
@@ -783,6 +787,13 @@ internal sealed class MainForm : Form
 
         var log = ReadLog();
         int Count(Func<string[], bool> pred) => log.Count(pred);
+        string statsFile = Path.Combine(workDir, "address_stats.txt");
+        int addrOk = 0, addrBad = 0;
+        if (File.Exists(statsFile) && File.ReadAllText(statsFile).Split('\t') is { Length: 3 } ast) { int.TryParse(ast[0], out addrOk); int.TryParse(ast[1], out addrBad); }
+        report = new Stats(log.Count, Count(l => l[3].StartsWith("exported")), Count(l => l[3] == "contact"), Count(l => l[3].StartsWith("appointment")),
+            Count(l => l[3].Contains("calendar (tentative)")), Count(l => l[3] == "exported (encrypted)"), Count(l => l[3].StartsWith("skipped")), Count(l => l[3].StartsWith("FAILED")),
+            Count(l => l[5] == "yes"), seconds, File.Exists(nsf) ? new FileInfo(nsf).Length : 0, new FileInfo(pst).Length, addrOk, addrBad,
+            log.Where(l => l[3].StartsWith("FAILED")).GroupBy(l => l[3][8..]).Select(g => (g.Key, g.Count())).OrderByDescending(x => x.Item2).ToList());
         var outp = new List<string>
         {
             $"NSF -> PST summary  {DateTime.Now:yyyy-MM-dd HH:mm}  (numbers only)",
@@ -813,6 +824,139 @@ internal sealed class MainForm : Form
         outp.Add(bad == 0 ? "RESULT: all folders match" : $"RESULT: {bad} folder(s) do not match");
         allOk = bad == 0;
         return outp;
+    }
+
+    // =====================================================================================================
+    // visual report (summary.html): the numbers of summary.txt as one self-contained page, no scripts, no external files
+    // =====================================================================================================
+    const string ReportCss = """
+        :root{--bg:#f5f6fa;--card:#fff;--line:#e4e6ee;--text:#1c1f2a;--muted:#6b7280;--accent:#5b5bd6;--soft:#eeeefc;
+              --ok:#129654;--oksoft:#eaf8f0;--warn:#d68c08;--warnsoft:#fef6e6;--bad:#d63434;--badsoft:#fdecec}
+        @media (prefers-color-scheme:dark){:root{--bg:#13141a;--card:#1d1f28;--line:#323542;--text:#eaecf2;--muted:#969cac;--accent:#8480ff;
+              --soft:#2d2c50;--ok:#40c880;--oksoft:#182e24;--warn:#f0b034;--warnsoft:#342a16;--bad:#f26060;--badsoft:#3c1e22}}
+        *{box-sizing:border-box}
+        body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 "Segoe UI","Microsoft JhengHei UI","PingFang TC",sans-serif}
+        .wrap{max-width:980px;margin:0 auto;padding:32px 20px 48px}
+        header{display:flex;align-items:center;gap:14px}
+        .logo{width:46px;height:46px;border-radius:13px;background:linear-gradient(135deg,#8b5cf6,#4f46e5);display:grid;place-items:center;
+              box-shadow:0 6px 18px rgba(91,91,214,.35)}
+        .brand{font-size:24px;font-weight:700;letter-spacing:.2px}.brand b{color:var(--accent);font-weight:700;margin:0 4px}
+        .sub{color:var(--muted);font-size:13px}
+        .hero{display:flex;align-items:center;gap:18px;border-radius:18px;padding:22px 26px;margin:24px 0 16px}
+        .hero.ok{background:var(--oksoft)}.hero.warn{background:var(--warnsoft)}
+        .hero .mark{width:54px;height:54px;border-radius:50%;display:grid;place-items:center;border:3px solid currentColor;font-size:26px;font-weight:700;flex:none}
+        .hero.ok .mark{color:var(--ok)}.hero.warn .mark{color:var(--warn)}
+        .hero h1{margin:0;font-size:22px}.hero p{margin:2px 0 0;color:var(--muted)}
+        .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px}
+        .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px 18px}
+        .kpi .l{color:var(--muted);font-size:13px}.kpi .v{font-size:30px;font-weight:700;line-height:1.2}.kpi.bad{background:var(--badsoft)}.kpi.bad .v{color:var(--bad)}
+        .grid2{display:grid;grid-template-columns:1.15fr 1fr;gap:16px;margin-top:16px}.full{margin-top:16px}
+        @media (max-width:780px){.grid2{grid-template-columns:1fr}}
+        h2{font-size:15px;margin:0 0 12px}
+        .donut{display:flex;gap:18px;align-items:center}
+        .legend{list-style:none;margin:0;padding:0;font-size:13px}.legend li{display:flex;align-items:center;gap:8px;margin:4px 0}
+        .legend i{width:10px;height:10px;border-radius:3px;display:inline-block}.legend span{margin-left:auto;font-weight:600;padding-left:12px}
+        .meter{height:12px;border-radius:7px;background:var(--badsoft);overflow:hidden;margin:10px 0 6px}.meter i{display:block;height:100%;background:linear-gradient(90deg,#2dd4bf,#0d9488)}
+        .facts{display:grid;grid-template-columns:1fr auto;gap:4px 12px;font-size:13px;color:var(--muted)}.facts b{color:var(--text);text-align:right}
+        .row{display:grid;grid-template-columns:minmax(160px,2fr) 3fr 100px 100px 26px;gap:12px;align-items:center;padding:9px 0;border-top:1px solid var(--line);font-size:14px}
+        .row.h{border-top:none;color:var(--muted);font-size:12px;font-weight:600;padding-top:0}
+        .row .n{text-align:right;font-variant-numeric:tabular-nums}.name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .bar{position:relative;height:10px;border-radius:6px;background:var(--soft)}
+        .bar .nsf{position:absolute;inset:0 auto 0 0;border-radius:6px;border:1.5px dashed var(--muted);opacity:.55}
+        .bar .pst{position:absolute;inset:0 auto 0 0;border-radius:6px;background:linear-gradient(90deg,#8b5cf6,#5b5bd6)}
+        .ok{color:var(--ok)}.badc{color:var(--bad)}
+        .reasons{margin:0;padding-left:18px;font-size:13px}.reasons li{margin:4px 0}
+        footer{margin-top:22px;color:var(--muted);font-size:12px;text-align:center}
+        @media print{body{background:#fff}.card{break-inside:avoid}}
+        """;
+
+    /// <summary>Builds summary.html from the last run (numbers only; folder names follow the "hide folder names" option).</summary>
+    string ReportHtml(bool allOk)
+    {
+        var s = report!;
+        static string E(string x) => System.Net.WebUtility.HtmlEncode(x);
+        int bad = folderRows.Count(r => !r.ok);
+        var h = new StringBuilder();
+        h.Append($"<!doctype html><html lang=\"{(En ? "en" : "zh-Hant")}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
+        h.Append($"<title>Nsf2Pst · {E(L("轉換報告", "Conversion report"))}</title><style>{ReportCss}</style></head><body><div class=\"wrap\">");
+        h.Append("<header><div class=\"logo\"><svg viewBox=\"0 0 24 24\" width=\"24\" height=\"24\" fill=\"none\" stroke=\"#fff\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\">");
+        h.Append("<rect x=\"3\" y=\"5.5\" width=\"18\" height=\"13\" rx=\"2.5\"/><path d=\"M4 7.5l8 5.5 8-5.5\"/></svg></div>");
+        h.Append($"<div><div class=\"brand\">Nsf<b>&rarr;</b>Pst</div><div class=\"sub\">{E(L("轉換報告 · 只有數字，可以對外提供", "Conversion report · numbers only, safe to share"))} · {DateTime.Now:yyyy-MM-dd HH:mm}</div></div></header>");
+
+        string took = Duration(TimeSpan.FromSeconds(s.Seconds));
+        h.Append($"<section class=\"hero {(allOk ? "ok" : "warn")}\"><div class=\"mark\">{(allOk ? "&#10003;" : "!")}</div><div>");
+        h.Append($"<h1>{E(allOk ? L("所有資料夾數量核對正確", "All folder counts match") : L($"{bad} 個資料夾數量對唔上", $"{bad} folder(s) do not match"))}</h1>");
+        h.Append($"<p>{E(L("用時", "Took"))} {took} · NSF {SizeText(s.NsfSize)} → PST {SizeText(s.PstSize)} · {folderRows.Count} {E(L("個資料夾", "folders"))}</p></div></section>");
+
+        void Kpi(string label, int v, bool warnWhenNonZero = false) =>
+            h.Append($"<div class=\"card kpi{(warnWhenNonZero && v > 0 ? " bad" : "")}\"><div class=\"l\">{E(label)}</div><div class=\"v\">{v:N0}</div></div>");
+        h.Append("<section class=\"kpis\">");
+        Kpi(L("郵件", "Mail"), s.Mails); Kpi(L("聯絡人", "Contacts"), s.Contacts); Kpi(L("日曆項目", "Calendar"), s.Calendar + s.Invites);
+        Kpi(L("未讀", "Unread"), s.Unread); Kpi(L("加密郵件已解密", "Encrypted, decrypted"), s.Encrypted); Kpi(L("失敗", "Failed"), s.Failed, true);
+        h.Append("</section>");
+
+        // donut: what the documents in the NSF were
+        var segs = new (string label, int v, string color)[]
+        {
+            (L("郵件", "Mail"), s.Mails, "#6366f1"), (L("聯絡人", "Contacts"), s.Contacts, "#14b8a6"), (L("日曆", "Calendar"), s.Calendar, "#f59e0b"),
+            (L("略過（非郵件）", "Skipped (not mail)"), s.Skipped, "#94a3b8"), (L("失敗", "Failed"), s.Failed, "#ef4444"),
+        };
+        int total = Math.Max(1, segs.Sum(x => x.v));
+        const double R = 54, C = 2 * Math.PI * R;
+        var inv = CultureInfo.InvariantCulture;
+        h.Append("<section class=\"grid2\"><div class=\"card\"><h2>").Append(E(L("文件組成", "What was in the NSF"))).Append("</h2><div class=\"donut\">");
+        h.Append("<svg viewBox=\"0 0 140 140\" width=\"140\" height=\"140\"><circle cx=\"70\" cy=\"70\" r=\"54\" fill=\"none\" stroke=\"var(--soft)\" stroke-width=\"18\"/>");
+        double off = 0;
+        foreach (var (_, v, color) in segs.Where(x => x.v > 0))
+        {
+            double len = C * v / total;
+            h.Append(string.Format(inv, "<circle cx=\"70\" cy=\"70\" r=\"54\" fill=\"none\" stroke=\"{0}\" stroke-width=\"18\" stroke-dasharray=\"{1:F2} {2:F2}\" stroke-dashoffset=\"{3:F2}\" transform=\"rotate(-90 70 70)\"/>",
+                color, Math.Max(0, len - 1.5), C - Math.Max(0, len - 1.5), -off));
+            off += len;
+        }
+        h.Append($"<text x=\"70\" y=\"68\" text-anchor=\"middle\" font-size=\"24\" font-weight=\"700\" fill=\"var(--text)\">{s.Docs:N0}</text>");
+        h.Append($"<text x=\"70\" y=\"88\" text-anchor=\"middle\" font-size=\"11\" fill=\"var(--muted)\">{E(L("份文件", "documents"))}</text></svg><ul class=\"legend\">");
+        foreach (var (label, v, color) in segs) h.Append($"<li><i style=\"background:{color}\"></i>{E(label)}<span>{v:N0}</span></li>");
+        h.Append("</ul></div>");
+        if (s.Invites > 0) h.Append($"<p class=\"sub\">{E(L($"另外 {s.Invites:N0} 封未回覆邀請已加入日曆（暫定）。", $"{s.Invites:N0} unanswered invitation(s) were also added to the calendar as tentative."))}</p>");
+        h.Append("</div>");
+
+        // run facts + address resolution
+        h.Append($"<div class=\"card\"><h2>{E(L("轉換資料", "Run details"))}</h2><div class=\"facts\">");
+        void Fact(string k, string v) => h.Append($"<span>{E(k)}</span><b>{E(v)}</b>");
+        Fact(L("用時", "Time"), took); Fact(L("NSF 大小", "NSF size"), SizeText(s.NsfSize)); Fact(L("PST 大小", "PST size"), SizeText(s.PstSize));
+        Fact(L("資料夾", "Folders"), folderRows.Count.ToString("N0")); Fact(L("未讀", "Unread"), s.Unread.ToString("N0"));
+        Fact(L("加密郵件已解密", "Encrypted mail decrypted"), s.Encrypted.ToString("N0"));
+        h.Append("</div>");
+        if (s.AddrOk + s.AddrBad > 0)
+        {
+            int pct = (int)Math.Round(100.0 * s.AddrOk / (s.AddrOk + s.AddrBad));
+            h.Append($"<h2 style=\"margin-top:18px\">{E(L("Notes 名轉 email 地址", "Notes names to email addresses"))}</h2><div class=\"meter\"><i style=\"width:{pct}%\"></i></div>");
+            h.Append($"<div class=\"facts\"><span>{E(L("已轉換", "Resolved"))}</span><b>{s.AddrOk:N0} ({pct}%)</b><span>{E(L("轉換唔到", "Not resolvable"))}</span><b>{s.AddrBad:N0}</b></div>");
+        }
+        h.Append("</div></section>");
+
+        // folders: NSF (dashed outline) vs PST (filled), unread, check
+        int max = Math.Max(1, folderRows.Count == 0 ? 1 : folderRows.Max(r => Math.Max(r.exp, r.pst)));
+        h.Append($"<section class=\"card full\"><h2>{E(L("資料夾核對", "Folder check"))}</h2>");
+        h.Append($"<div class=\"row h\"><span>{E(L("資料夾", "Folder"))}</span><span>{E(L("數量（虛線 NSF · 實色 PST）", "Items (dashed NSF, filled PST)"))}</span><span class=\"n\">NSF / PST</span><span class=\"n\">{E(L("未讀", "Unread"))}</span><span></span></div>");
+        foreach (var r in folderRows)
+        {
+            string name = r.name == "(default folders)" ? L("預設資料夾（收件匣、寄件備份 …）", "Default folders (Inbox, Sent ...)") : r.name;
+            h.Append(string.Format(inv, "<div class=\"row\"><span class=\"name\" title=\"{0}\">{0}</span><div class=\"bar\"><div class=\"nsf\" style=\"width:{1:F1}%\"></div><div class=\"pst\" style=\"width:{2:F1}%\"></div></div>",
+                E(name), 100.0 * r.exp / max, 100.0 * r.pst / max));
+            h.Append($"<span class=\"n\">{r.exp:N0} / {r.pst:N0}</span><span class=\"n\">{r.expU:N0} / {r.pstU:N0}</span><span class=\"{(r.ok ? "ok" : "badc")}\">{(r.ok ? "&#10003;" : "&#10007;")}</span></div>");
+        }
+        h.Append("</section>");
+
+        if (s.Fails.Count > 0)
+        {
+            h.Append($"<section class=\"card\" style=\"margin-top:16px\"><h2>{E(L("失敗原因", "Failure reasons"))}</h2><ul class=\"reasons\">");
+            foreach (var (reason, count) in s.Fails) h.Append($"<li><b>{count:N0}</b> × {E(reason)}</li>");
+            h.Append("</ul></section>");
+        }
+        h.Append($"<footer>Nsf2Pst · {E(L("此報告只包含數量，不含任何郵件內容。", "This report contains counts only, no mail content."))}</footer></div></body></html>");
+        return h.ToString();
     }
 
     /// <summary>export_log.csv rows as string arrays (NoteID, UNID, Form, Status, BodyRebuilt, Unread, Folders, Subject).</summary>
@@ -897,10 +1041,10 @@ internal sealed class MainForm : Form
     /// <summary>Glyphs of the Windows icon font (Segoe Fluent Icons on Windows 11, Segoe MDL2 Assets on Windows 10).</summary>
     static class Ico
     {
-        public const string Mail = "", Upload = "", Settings = "", ChevronDown = "", ChevronUp = "", Forward = "",
-            Stop = "", Folder = "", Document = "", List = "", Refresh = "", Contact = "", Calendar = "",
-            Unread = "", Warning = "", Completed = "", ErrorBadge = "", CheckMark = "", Cancel = "",
-            Globe = "", Moon = "", Sun = "";
+        public const string Mail = "\uE715", Upload = "\uE898", Settings = "\uE713", ChevronDown = "\uE70D", ChevronUp = "\uE70E", Forward = "\uE72A",
+            Stop = "\uE71A", Folder = "\uE8B7", Document = "\uE8A5", List = "\uE8FD", Refresh = "\uE72C", Contact = "\uE77B", Calendar = "\uE787",
+            Unread = "\uE715", Warning = "\uE7BA", Completed = "\uE930", ErrorBadge = "\uEA39", CheckMark = "\uE73E", Cancel = "\uE711",
+            Globe = "\uE774", Moon = "\uE708", Sun = "\uE706", Chart = "\uE9D2";
         static readonly string family = FontFamily.Families.Any(f => f.Name == "Segoe Fluent Icons") ? "Segoe Fluent Icons" : "Segoe MDL2 Assets";
         public static Font Font(float size) => new(family, size);
     }
@@ -1060,21 +1204,72 @@ internal sealed class MainForm : Form
         }
     }
 
-    /// <summary>Accent-tinted rounded square with an icon glyph.</summary>
+    /// <summary>
+    /// The app logo (same design as app.ico): violet-to-indigo rounded square with a soft top highlight and a white glyph,
+    /// optionally with the teal "transfer" badge in the lower right corner.
+    /// </summary>
+    static void DrawLogo(Graphics g, RectangleF r, string glyph, bool badge, int dpi)
+    {
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var path = Round(r, r.Width / 3.6f);
+        using (var lg = new LinearGradientBrush(r, Color.FromArgb(139, 92, 246), Color.FromArgb(79, 70, 229), LinearGradientMode.ForwardDiagonal)) g.FillPath(lg, path);
+        var top = new RectangleF(r.X, r.Y, r.Width, r.Height * 0.55f);
+        using (var hl = new LinearGradientBrush(top, Color.FromArgb(46, Color.White), Color.FromArgb(0, Color.White), LinearGradientMode.Vertical))
+        {
+            var clip = g.Clip; g.SetClip(path); g.FillRectangle(hl, top); g.Clip = clip;
+        }
+        float shift = badge ? r.Width * 0.06f : 0;
+        var gr = new RectangleF(r.X - shift, r.Y - shift, r.Width, r.Height);
+        using (var f = Ico.Font(r.Height * 0.38f * 72f / dpi))
+            TextRenderer.DrawText(g, glyph, f, Rectangle.Round(gr), Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+        if (!badge) return;
+        float d = r.Width * 0.44f, cx = r.Right - d * 0.62f, cy = r.Bottom - d * 0.62f;
+        var ring = new RectangleF(cx - d / 2, cy - d / 2, d, d);
+        using (var white = new SolidBrush(Color.White)) g.FillEllipse(white, ring);
+        var dot = RectangleF.Inflate(ring, -d * 0.11f, -d * 0.11f);
+        using (var teal = new LinearGradientBrush(dot, Color.FromArgb(45, 212, 191), Color.FromArgb(13, 148, 136), LinearGradientMode.ForwardDiagonal)) g.FillEllipse(teal, dot);
+        using var af = Ico.Font(d * 0.42f * 72f / dpi);
+        TextRenderer.DrawText(g, Ico.Forward, af, Rectangle.Round(dot), Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+    }
+
+    /// <summary>The logo as a control (header) or a plain glyph tile (chosen file).</summary>
     sealed class IconBadge : Control
     {
         readonly string glyph;
-        public IconBadge(string glyph) { this.glyph = glyph; SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true); }
+        readonly bool badge;
+        public IconBadge(string glyph, bool badge = false) { this.glyph = glyph; this.badge = badge; SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true); }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.Clear(Parent?.BackColor ?? Th.Surface);
+            DrawLogo(e.Graphics, new RectangleF(0, 0, Width - 1, Height - 1), glyph, badge, DeviceDpi);
+        }
+    }
+
+    /// <summary>"Nsf → Pst" word mark: the arrow in the accent colour.</summary>
+    sealed class Wordmark : Control
+    {
+        readonly Font font = Th.Num(15f);
+        readonly Font arrow;
+        public Wordmark()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            arrow = Ico.Font(12f);
+            var a = TextRenderer.MeasureText("Nsf", font, Size.Empty, TextFormatFlags.NoPadding);
+            var b = TextRenderer.MeasureText(Ico.Forward, arrow, Size.Empty, TextFormatFlags.NoPadding);
+            var c = TextRenderer.MeasureText("Pst", font, Size.Empty, TextFormatFlags.NoPadding);
+            Size = new Size(a.Width + b.Width + c.Width + S(14), Math.Max(a.Height, c.Height) + S(2));
+            AccessibleName = "Nsf2Pst";
+        }
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
             g.Clear(Parent?.BackColor ?? Th.Surface);
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            using var path = Round(new RectangleF(0, 0, Width - 1, Height - 1), Width / 3.6f);
-            using var lg = new LinearGradientBrush(new RectangleF(0, 0, Width, Height), Color.FromArgb(124, 92, 246), Color.FromArgb(91, 91, 214), LinearGradientMode.ForwardDiagonal);
-            g.FillPath(lg, path);
-            using var f = Ico.Font(Height * 0.36f * 72f / DeviceDpi);
-            TextRenderer.DrawText(g, glyph, f, ClientRectangle, Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            var a = TextRenderer.MeasureText(g, "Nsf", font, Size.Empty, TextFormatFlags.NoPadding);
+            var b = TextRenderer.MeasureText(g, Ico.Forward, arrow, Size.Empty, TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, "Nsf", font, new Point(0, 0), Th.Text, TextFormatFlags.NoPadding);
+            int ax = a.Width + S(6), ay = (a.Height - b.Height) / 2 + S(2);
+            TextRenderer.DrawText(g, Ico.Forward, arrow, new Point(ax, ay), Th.Accent, TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, "Pst", font, new Point(ax + b.Width + S(7), 0), Th.Text, TextFormatFlags.NoPadding);
         }
     }
 
