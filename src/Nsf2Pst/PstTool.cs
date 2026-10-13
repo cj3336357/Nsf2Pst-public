@@ -19,6 +19,7 @@ internal static class PstTool
         try
         {
             if (cmd == "pst-export" && !File.Exists(pst)) { Console.WriteLine("fatal: PST not found: " + pst); return 3; }
+            if (cmd != "import" && File.Exists(pst) && CheckPst(pst) is string problem) { Console.WriteLine("fatal: " + problem); return 3; }
             using var store = new PstStore(pst);
             if (cmd == "list") { store.List(Console.Out); return 0; }
             if (cmd == "counts") { store.Counts(Console.Out); return 0; }
@@ -165,6 +166,21 @@ internal static class PstTool
                           $"{exFixed} Exchange address(es) replaced by SMTP; failed {failed}, {sw.Elapsed.TotalSeconds:F1}s");
         File.WriteAllText(Path.Combine(outDir, "address_stats.txt"), $"{exFixed}\t0\t0");
         return failed == 0 ? 0 : 1;
+    }
+
+    /// <summary>Clear reasons instead of MAPI error codes: the file is in use (Outlook keeps the PSTs of its profile
+    /// locked) or is not a PST at all. Null when the file looks usable.</summary>
+    static string? CheckPst(string pst)
+    {
+        var head = new byte[4];
+        try
+        {
+            using var fs = new FileStream(pst, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            if (fs.Read(head, 0, 4) < 4) return "not an Outlook data file (PST): " + pst;
+        }
+        catch (IOException) { return "the PST is in use by another program (close Outlook, or use a copy of the PST): " + pst; }
+        catch (UnauthorizedAccessException) { return "no permission to read the PST: " + pst; }
+        return head[0] == '!' && head[1] == 'B' && head[2] == 'D' && head[3] == 'N' ? null : "not an Outlook data file (PST): " + pst;
     }
 
     static string Csv(params string[] f) => string.Join(",", f.Select(x => "\"" + (x ?? "").Replace("\"", "\"\"") + "\""));

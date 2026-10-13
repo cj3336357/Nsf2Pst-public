@@ -42,8 +42,7 @@ internal static class ExportTool
         dynamic session = Activator.CreateInstance(Type.GetTypeFromProgID("Lotus.NotesSession", true)!)!;
         session.Initialize(password);
         string server = Opt("--server", ""), dbPath = args[1];
-        dynamic db = session.GetDatabase(server, dbPath, false);
-        if (!db.IsOpen) db.Open();
+        dynamic db = NotesApi.OpenDatabase(session, server, dbPath);
         string netPath = NotesApi.NetPath(server, (string)db.FilePath);
 
         // read/unread marks are stored per user name: default to the mailbox owner (calendar profile), not to the ID we run as
@@ -443,6 +442,16 @@ internal static class ExportTool
                         Regex.Replace(html.Text, "<img[^>]*cid:" + Regex.Escape(sp.ContentId) + "[^>]*>", "", RegexOptions.IgnoreCase));
             RemovePart(msg.Body, sp);
         }
+
+        // pictures the HTML shows (cid:) are inline parts. Notes exports them with "Content-Disposition: attachment",
+        // and Outlook then lists every embedded picture as an attachment as well.
+        string htmlText = string.Join("\n", msg.BodyParts.OfType<TextPart>().Where(t => t.IsHtml && !t.IsAttachment).Select(t => t.Text));
+        foreach (var part in msg.BodyParts.OfType<MimePart>().Where(p => !string.IsNullOrEmpty(p.ContentId)))
+            if (htmlText.Contains("cid:" + part.ContentId, StringComparison.OrdinalIgnoreCase))
+            {
+                part.ContentDisposition ??= new ContentDisposition();
+                part.ContentDisposition.Disposition = ContentDisposition.Inline;
+            }
 
         // attachment names: Notes may write them in a charset that lacks some characters ("?????.pdf" for 季度報告.pdf).
         // Take the Unicode name Notes stores instead: match each MIME attachment to a Notes attachment by decoded size

@@ -28,6 +28,33 @@ internal static class NotesApi
     [DllImport(Dll)] static extern ushort NotesInitExtended(int argc, [MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.LPStr)] string[] argv);
     [DllImport(Dll)] static extern ushort SECKFMSwitchToIDFile(byte[] idFile, byte[] password, byte[] userName, ushort maxLen, uint flags, IntPtr reserved);
 
+    /// <summary>Opens a database through the Notes COM classes with a clear message instead of a null reference when the
+    /// file is missing, is not a Notes database, is damaged or cannot be opened.</summary>
+    /// <summary>Notes keeps database paths in 256-byte buffers (MAXPATH): longer paths fail with "database object is invalid".</summary>
+    public const int MaxPathBytes = 250;
+
+    public static dynamic OpenDatabase(dynamic session, string server, string path)
+    {
+        if (server.Length == 0)
+        {
+            if (!File.Exists(path)) throw new FileNotFoundException("NSF file not found: " + path);
+            if (Encoding.UTF8.GetByteCount(path) > MaxPathBytes)
+                throw new PathTooLongException($"the NSF path is too long for Notes (more than about {MaxPathBytes} bytes; use a shorter folder or file name): " + path);
+            var head = new byte[2];
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) fs.ReadExactly(head);
+            if (head[0] != 0x1A || head[1] != 0x00) throw new InvalidDataException("not a Notes database (NSF): " + path);
+        }
+        dynamic? db = null;
+        try
+        {
+            db = session.GetDatabase(server, path, false);
+            if (db != null && !(bool)db.IsOpen) db.Open();
+        }
+        catch (Exception ex) { throw new IOException("cannot open the NSF (damaged, or no access with this Notes ID): " + path + " - " + ex.Message, ex); }
+        if (db == null || !(bool)db.IsOpen) throw new IOException("cannot open the NSF (damaged, or no access with this Notes ID): " + path);
+        return db;
+    }
+
     /// <summary>notes.ini of this Notes install (next to nnotes.dll).</summary>
     public static string? NotesIni() => ProgramDirs().Select(d => Path.Combine(d, "notes.ini")).FirstOrDefault(File.Exists);
 

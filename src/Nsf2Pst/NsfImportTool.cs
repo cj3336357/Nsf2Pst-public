@@ -76,6 +76,8 @@ internal static class NsfImportTool
         {
             nsf = Path.GetFullPath(nsf);
             if (File.Exists(nsf)) { Console.WriteLine("fatal: the NSF already exists (a new file is always created): " + nsf); return 3; }
+            if (Encoding.UTF8.GetByteCount(nsf) > NotesApi.MaxPathBytes)
+            { Console.WriteLine($"fatal: the NSF path is too long for Notes (more than about {NotesApi.MaxPathBytes} bytes; use a shorter folder or file name): " + nsf); return 3; }
         }
 
         // ---- new mail file from the mail template -------------------------------------------------------------
@@ -353,8 +355,7 @@ internal static class NsfImportTool
     static int Counts(dynamic session, string nsf, Func<string, string, string> Opt)
     {
         string server = Opt("--server", "");
-        dynamic db = session.GetDatabase(server, server.Length == 0 ? Path.GetFullPath(nsf) : nsf, false);
-        if (!(bool)db.IsOpen) db.Open();
+        dynamic db = NotesApi.OpenDatabase(session, server, server.Length == 0 ? Path.GetFullPath(nsf) : nsf);
         string user = Opt("--user", "");
         if (user.Length == 0)
         {

@@ -143,6 +143,12 @@ report.
 - Rebuilt bodies (only for mail Notes converts lossily) are plain text: tables and colours are lost.
 - NSF -> PST does not convert: mail rules, signature, out-of-office message, contact groups, to-dos, Notes categories.
 - No resume / incremental mode: an interrupted run starts again with a new PST.
+- Disk space: the work folder holds every mail as an EML file, so allow free space of about 2.5 times the mailbox
+  size next to the output file. Tested up to 18,000 mails and a 2 GB PST (PST -> NSF: about 2 minutes, under 300 MB
+  memory per step).
+- Notes cannot open databases whose path is longer than about 250 bytes (a Chinese character takes 3 bytes); the
+  window checks this before it starts.
+- A stopped or failed run renames its half-written output to `<name>_incomplete_<time>.pst/.nsf`.
 - Tested with a handful of real mailboxes up to about 800 MB. Test with your own mailboxes before relying on it.
 
 ## Tests

@@ -20,6 +20,10 @@ internal static class Program
         if (args.Length == 0)
         {
             ApplicationConfiguration.Initialize();
+            // an unexpected error must not end in the framework's "Continue / Quit" dialog
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += (_, e) => MessageBox.Show(
+                (MainForm.En ? "Unexpected error:\n\n" : "發生未預料嘅錯誤：\n\n") + e.Exception.Message, "Nsf2Pst", MessageBoxButtons.OK, MessageBoxIcon.Error);
             MainForm form;
             do { MainForm.Prepare(); form = new MainForm(); Application.Run(form); }
             while (form.RestartRequested);   // language / theme switch: reopen with the same field values

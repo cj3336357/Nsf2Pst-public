@@ -14,7 +14,7 @@ namespace Nsf2Pst;
 internal sealed class MainForm : Form
 {
     // ---- language / theme (chosen before the controls are created; switching rebuilds the window)
-    static bool En;
+    internal static bool En;
     static string L(string zh, string en) => En ? en : zh;
 
     /// <summary>Sets language and theme from the saved settings (or Windows) before a window is created.</summary>
@@ -45,6 +45,17 @@ internal sealed class MainForm : Form
     Process? child;
     bool stopRequested;
     string workDir = "", statusBase = "";
+    string? lastFatal;   // last "fatal: ..." line of a child: shown as the reason when a run fails
+
+    /// <summary>The reason of a failed step in the UI language (known causes), else the child's own text.</summary>
+    static string FriendlyFatal(string f) =>
+        f.Contains("in use by another program") ? L("PST 檔被其他程式使用緊（例如 Outlook），請先關閉 Outlook 或者用 PST 嘅副本。", "The PST is in use by another program (e.g. Outlook). Close Outlook or use a copy of the PST.")
+        : f.Contains("not an Outlook data file") ? L("呢個檔案唔係 Outlook 資料檔（PST）。", "This file is not an Outlook data file (PST).")
+        : f.Contains("not a Notes database") ? L("呢個檔案唔係 Notes 資料庫（NSF）。", "This file is not a Notes database (NSF).")
+        : f.Contains("cannot open the NSF") ? L("開唔到 NSF：檔案可能已損壞，或者而家個 Notes ID 冇權限。", "The NSF cannot be opened: it may be damaged, or this Notes ID has no access.")
+        : f.Contains("path is too long") ? L("NSF 嘅路徑太長，Notes 開唔到，請用較短嘅 folder 或者檔名。", "The NSF path is too long for Notes. Use a shorter folder or file name.")
+        : f.Contains("not found") ? L("搵唔到檔案。", "File not found.")
+        : f;
 
     // ---- direction: NSF -> PST (default) or PST -> NSF. txtNsf / txtPst keep their names (UI Automation ids) and always
     // hold the SOURCE / the OUTPUT file: in PST -> NSF mode txtNsf holds the PST and txtPst the new NSF.
@@ -639,16 +650,37 @@ internal sealed class MainForm : Form
                                     "The output NSF already exists. Use a new file name (a new NSF is always created)."), Text);
             return;
         }
+        // Notes cannot open a database whose path is longer than about 255 bytes (a Chinese character takes 3)
+        string nsfPath = Rev ? dst : src;
+        if ((Rev ? !dstOnServer : server.Length == 0) && Encoding.UTF8.GetByteCount(nsfPath) > NsfExport.NotesApi.MaxPathBytes)
+        {
+            MessageBox.Show(this, L($"NSF 嘅路徑太長，Notes 開唔到（上限大約 {NsfExport.NotesApi.MaxPathBytes} bytes，每個中文字佔 3 bytes）。請將檔案放去較短嘅 folder 或者用較短嘅檔名。\n\n{nsfPath}",
+                                    $"The NSF path is too long for Notes (about {NsfExport.NotesApi.MaxPathBytes} bytes; a Chinese character takes 3). Use a shorter folder or file name.\n\n{nsfPath}"), Text,
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
         txtPst.Text = dst;
         string workBase = dstOnServer ? Path.Combine(Path.GetDirectoryName(Path.GetFullPath(src))!, Path.GetFileNameWithoutExtension(dst)) : Path.ChangeExtension(dst, null);
         workDir = workBase + "_work";
         // PST -> NSF: the EML files of an earlier run must not mix in, so an existing work folder gets a new name (never deleted)
         if (Rev && Directory.Exists(workDir)) workDir = workBase + "_work_" + DateTime.Now.ToString("yyyyMMdd_HHmmss");
-        Directory.CreateDirectory(workDir);
+        try
+        {
+            Directory.CreateDirectory(workDir);
+            string probe = Path.Combine(workDir, ".write_test");   // the work folder and the output go to the same place
+            File.WriteAllText(probe, ""); File.Delete(probe);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            MessageBox.Show(this, L($"冇權限寫入輸出位置，請揀另一個 folder。\n\n{ex.Message}", $"The output location cannot be written to. Choose another folder.\n\n{ex.Message}"), Text,
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
         string nsf = Rev ? dst : src, pst = Rev ? src : dst;
 
         SetRunning(true);
         txtLog.Clear();
+        lastFatal = null;
         foreach (var t in tiles.Values) { t.Text = "–"; t.ForeColor = Th.Text; }
         lblRunTitle.Text = L("轉換中", "Converting");
         lblRunFile.Text = $"{Path.GetFileName(src)}  →  {Path.GetFileName(dst)}";
@@ -694,9 +726,27 @@ internal sealed class MainForm : Form
         finally
         {
             clock.Stop();
+            // a stopped or failed run leaves a half-written output file: rename it so that it is not taken for a
+            // complete mailbox (it is kept for checking; the output did not exist before this run)
+            string? incomplete = !finished && !dstOnServer ? await MoveIncomplete(dst) : null;
             SetRunning(false);
-            ShowDone(finished, allOk, stopped, failText, dst);
+            ShowDone(finished, allOk, stopped, failText, dst, incomplete);
         }
+    }
+
+    async Task<string?> MoveIncomplete(string path)
+    {
+        if (!File.Exists(path)) return null;
+        string target = Path.Combine(Path.GetDirectoryName(path)!,
+            Path.GetFileNameWithoutExtension(path) + "_incomplete_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + Path.GetExtension(path));
+        for (int i = 0; i < 10; i++)   // the stopped child may hold the file for a moment
+        {
+            try { File.Move(path, target); Log(L("未完成嘅輸出檔已改名：", "The incomplete output file was renamed: ") + target); return target; }
+            catch (IOException) { await Task.Delay(500); }
+            catch (UnauthorizedAccessException) { await Task.Delay(500); }
+        }
+        Log(L("警告：未完成嘅輸出檔改唔到名，請唔好使用：", "Warning: the incomplete output file could not be renamed, do not use it: ") + path);
+        return null;
     }
 
     /// <summary>PST -> NSF: read the PST (Outlook side), write a new NSF (Notes side), set unread marks, verify.</summary>
@@ -752,7 +802,7 @@ internal sealed class MainForm : Form
         return allOk;
     }
 
-    void ShowDone(bool finished, bool allOk, bool stopped, string failText, string pst)
+    void ShowDone(bool finished, bool allOk, bool stopped, string failText, string pst, string? incomplete = null)
     {
         Color tint;
         if (finished)
@@ -770,7 +820,9 @@ internal sealed class MainForm : Form
             lblDoneIcon.ForeColor = stopped ? Th.Warn : Th.Bad;
             tint = stopped ? Th.WarnSoft : Th.BadSoft;
             lblDoneTitle.Text = stopped ? L("轉換已停止", "Conversion stopped") : L($"轉換未完成：{failText}", $"Conversion not finished: {failText}");
-            lblDoneSub.Text = L("撳下面嘅「顯示詳細記錄」睇原因。", "Open \"Show details\" below to see why.");
+            lblDoneSub.Text = (!stopped && lastFatal != null ? FriendlyFatal(lastFatal) + "　" : "") + (incomplete != null
+                ? L($"未完成嘅檔案已改名做 {Path.GetFileName(incomplete)}，唔好當完整郵箱使用。", $"The incomplete file was renamed to {Path.GetFileName(incomplete)} - do not use it as a complete mailbox.")
+                : L("撳下面嘅「顯示詳細記錄」睇原因。", "Open \"Show details\" below to see more."));
         }
         hero.Fill = tint; hero.Border = Color.Empty; hero.Invalidate();
         foreach (Control c in hero.Controls) c.BackColor = tint;
@@ -824,6 +876,7 @@ internal sealed class MainForm : Form
                         lblStatus.Text = $"{statusBase}{L("（", " (")}{done:N0} / {total:N0}{L("）", ")")}";
                     }
                 }
+                else if (line.StartsWith("fatal: ")) { lastFatal = line[7..]; Log("  " + line); }
                 else if (capture != null) capture.Add(line);
                 else Log("  " + line);
             });
