@@ -9,8 +9,10 @@ and read / unread marks being lost.
 
 ![Nsf2Pst window after converting a sample mailbox](docs/screenshot.png)
 
-*The user interface is in Traditional Chinese (Cantonese). The screenshot shows a generated sample mailbox with
-fictional data.*
+*The window is available in English and Traditional Chinese, with light and dark themes (both follow Windows and can be
+switched in the title area). The screenshots show a generated sample mailbox with fictional data.*
+
+<img src="docs/screenshot-zh-light.png" alt="Chinese UI, light theme" width="420">
 
 ## Features
 
@@ -48,7 +50,7 @@ dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true 
 
 ### Window
 
-Start `Nsf2Pst.exe` without arguments.
+Start `Nsf2Pst.exe` without arguments. Drop an `.nsf` file on the window or press Ctrl+O to choose one.
 
 1. **NSF file**: the mail file. **Work on a copy**; Notes updates view indexes inside the file it opens.
 2. **Output PST**: a new file (an existing PST is never appended to).
@@ -59,7 +61,9 @@ Start `Nsf2Pst.exe` without arguments.
    - **Read/unread user**: leave empty to use the mailbox owner.
    - **Owner Notes ID** + **password**: only needed for encrypted mail.
    - **Hide folder names in summary**: for sharing `summary.txt`.
-4. Press **Start**. The work folder `<pst name>_work` next to the PST holds the per-document log
+4. Press **Start** (or Enter). The window shows the three steps (export, write PST, verify), the percentage and an
+   estimate of the remaining time; the taskbar button shows the progress too. At the end it shows the counts and a
+   per-folder check. The work folder `<pst name>_work` next to the PST holds the per-document log
    (`export_log.csv`), `summary.txt` and `unresolved_names.txt`.
 
 ### Command line

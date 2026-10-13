@@ -24,7 +24,7 @@ $t0 = Get-Date
 do {
   Start-Sleep -Seconds 1
   $status = (El 'lblStatus').Current.Name
-} while ($status -notmatch '完成|失敗|出錯|已停止|缺少' -and ((Get-Date) - $t0).TotalSeconds -lt $TimeoutSec)
+} while ($status -notmatch '完成|失敗|出錯|已停止|缺少|Done|failed|Error|Stopped|Missing' -and ((Get-Date) - $t0).TotalSeconds -lt $TimeoutSec)
 "status: $status   ({0:N0}s)" -f ((Get-Date) - $t0).TotalSeconds
 "----- log -----"
 (El 'txtLog').GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value

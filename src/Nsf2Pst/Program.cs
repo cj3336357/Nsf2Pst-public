@@ -19,7 +19,9 @@ internal static class Program
         if (args.Length == 0)
         {
             ApplicationConfiguration.Initialize();
-            Application.Run(new MainForm());
+            MainForm form;
+            do { MainForm.Prepare(); form = new MainForm(); Application.Run(form); }
+            while (form.RestartRequested);   // language / theme switch: reopen with the same field values
             return 0;
         }
 
