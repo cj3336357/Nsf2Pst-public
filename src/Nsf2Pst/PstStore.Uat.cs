@@ -41,6 +41,36 @@ internal sealed partial class PstStore
         return b.ToArray();
     }
 
+    /// <summary>Weekly-on-Wednesday pattern with one modified occurrence (ExceptionInfo + ExtendedException, MS-OXOCAL 2.2.1.44.2-4).</summary>
+    static byte[] RecurBlobWithException(DateTime first, uint count, int startMin, int endMin, DateTime originalDay, DateTime newStart, string newSubject)
+    {
+        static uint Min(DateTime d) => (uint)(d - new DateTime(1601, 1, 1)).TotalMinutes;
+        var b = new List<byte>();
+        void W16(int v) => b.AddRange(BitConverter.GetBytes((ushort)v));
+        void W32(long v) => b.AddRange(BitConverter.GetBytes((uint)v));
+        DateTime last = first.AddDays(7 * (count - 1));
+        W16(0x3004); W16(0x3004); W16(0x200B); W16(0x1); W16(0);
+        W32(0); W32(1); W32(0); W32(0x08);                               // every week, Wednesday
+        W32(0x2022); W32(count); W32(0);
+        W32(1); W32(Min(originalDay));                                    // deleted (= modified) instance: its original date
+        W32(1); W32(Min(newStart.Date));                                  // modified instance date
+        W32(Min(first)); W32(Min(last));
+        W32(0x3006); W32(0x3009); W32(startMin); W32(endMin);
+        W16(1);                                                           // one ExceptionInfo
+        W32(Min(newStart)); W32(Min(newStart.AddMinutes(endMin - startMin))); W32(Min(originalDay) + startMin);
+        W16(0x0001);                                                      // ARO_SUBJECT
+        byte[] ansi = System.Text.Encoding.ASCII.GetBytes("moved");
+        W16(ansi.Length + 1); W16(ansi.Length); b.AddRange(ansi);
+        W32(0);                                                           // ReservedBlock1Size
+        W32(4); W32(0);                                                   // ExtendedException: ChangeHighlight
+        W32(0);                                                           // ReservedBlockEE1Size
+        W32(Min(newStart)); W32(Min(newStart.AddMinutes(endMin - startMin))); W32(Min(originalDay) + startMin);
+        W16(newSubject.Length); b.AddRange(System.Text.Encoding.Unicode.GetBytes(newSubject));
+        W32(0);                                                           // ReservedBlockEE2Size
+        W32(0);                                                           // ReservedBlock2Size
+        return b.ToArray();
+    }
+
     public void MakeUatItems()
     {
         var local = TimeSpan.FromHours(8);
@@ -85,6 +115,26 @@ internal sealed partial class PstStore
         Repeating("UAT R5 每週五 (刪除兩次)", At(2024, 5, 3, 16, 0), At(2024, 5, 3, 17, 0), 2,
             RecurBlob(0x200B, 0x1, 1, new uint[] { 0x20 }, 0x2021, 9, new(2024, 5, 3), new(2024, 6, 28), 960, 1020, new DateTime[] { new(2024, 5, 17), new(2024, 6, 7) }),
             "5/3 至 6/28 每週五，5/17 及 6/7 取消，共 7 次");
+
+        // R6 every Monday 07:30 (before 08:00 local = the previous day in UTC), 4 times from 2024-06-03
+        Repeating("UAT R6 每週一 07:30", At(2024, 6, 3, 7, 30), At(2024, 6, 3, 8, 0), 2,
+            RecurBlob(0x200B, 0x1, 1, new uint[] { 0x02 }, 0x2022, 4, new(2024, 6, 3), new(2024, 6, 24), 450, 480, Array.Empty<DateTime>()),
+            "應該係 6/3 6/10 6/17 6/24（全部星期一）");
+        // R7 monthly on day 31, 5 times from 2024-01-31 (Outlook: the last day of shorter months)
+        Repeating("UAT R7 每月 31 號", At(2024, 1, 31, 10, 0), At(2024, 1, 31, 11, 0), 3,
+            RecurBlob(0x200C, 0x2, 1, new uint[] { 31 }, 0x2022, 5, new(2024, 1, 31), new(2024, 5, 31), 600, 660, Array.Empty<DateTime>()),
+            "應該係 1/31 2/29 3/31 4/30 5/31");
+        // R8 all-day, every day until 2024-07-05 (end by date), from 2024-07-01
+        {
+            var p = Appt("UAT R8 全日每日至 7/5", At(2024, 7, 1, 0, 0), At(2024, 7, 2, 0, 0), true, null, "應該係 7/1 至 7/5 共 5 日");
+            p.Add((A(0x8223, Tags.PT_BOOLEAN), true)); p.Add((A(0x8231, Tags.PT_LONG), 1));
+            p.Add((A(0x8216, Tags.PT_BINARY), RecurBlob(0x200A, 0x0, 1440, Array.Empty<uint>(), 0x2021, 5, new(2024, 7, 1), new(2024, 7, 5), 0, 1440, Array.Empty<DateTime>())));
+            SaveNew("@Calendar", p);
+        }
+        // R9 every Wednesday 4 times from 2024-06-05 15:00, the 6/12 occurrence moved to Thursday 6/13 16:00 with its own subject
+        Repeating("UAT R9 每週三 (一次改咗)", At(2024, 6, 5, 15, 0), At(2024, 6, 5, 16, 0), 2,
+            RecurBlobWithException(new(2024, 6, 5), 4, 900, 960, new DateTime(2024, 6, 12), new DateTime(2024, 6, 13, 16, 0, 0), "UAT R9 改期：星期四"),
+            "應該係 6/5 6/13(改期) 6/19 6/26");
 
         // private appointment, multi-day all-day event
         var priv = Appt("UAT 私人約會：睇醫生", At(2024, 5, 7, 11, 0), At(2024, 5, 7, 12, 0), false, "診所", "私人");
@@ -164,6 +214,81 @@ internal sealed partial class PstStore
         Put(Sub(Folder("@Deleted"), "舊資料"), "UAT F4 刪除的郵件\\舊資料");
         foreach (string name in new[] { "Inbox", "Deleted Items", "Drafts", "Sent", "Trash", "Calendar", "Junk", "All Documents", "Follow Up" })
             Put(Sub(ipmRoot, name), "UAT N " + name);
+        // review findings: folders Notes treats specially, an unsent mail in a normal folder, an Exchange list without SMTP,
+        // a hidden Outlook contact folder, a contact with an Exchange address, a meeting request whose HTML is Big5
+        Put(Sub(ipmRoot, "(舊郵件)"), "UAT Y1 括號 folder");
+        Put(Sub(ipmRoot, "A | B"), "UAT Y2 直線 folder");
+        {
+            IMAPIFolder y = Sub(ipmRoot, "審查測試");
+            Check(y.CreateMessage(IntPtr.Zero, 0, out IMessage un), "CreateMessage");   // a new message is "unsent" by default
+            try
+            {
+                using var b = new Block(new List<(uint, object)> { (Tags.PR_MESSAGE_CLASS_W, "IPM.Note"), (Tags.PR_SUBJECT_W, "UAT Y3 未寄出但喺普通 folder"), (PR_BODY_W, "unsent"), (Tags.PR_MESSAGE_DELIVERY_TIME, when0) });
+                Check(un.SetProps(b.Count, b.Ptr, out IntPtr pr), "SetProps"); if (pr != IntPtr.Zero) Native.MAPIFreeBuffer(pr); Check(un.SaveChanges(0), "SaveChanges");
+            }
+            finally { Marshal.ReleaseComObject(un); }
+            Check(y.CreateMessage(IntPtr.Zero, 0, out IMessage dl), "CreateMessage");
+            try
+            {
+                const string listDn = "/O=EXAMPLECORP/OU=EXCHANGE ADMINISTRATIVE GROUP (FYDIBOHF23SPDLT)/CN=RECIPIENTS/CN=ALL-STAFF";
+                using (var b = new Block(Mail("UAT Y4 Exchange 群組冇 SMTP"))) { Check(dl.SetProps(b.Count, b.Ptr, out IntPtr pr), "SetProps"); if (pr != IntPtr.Zero) Native.MAPIFreeBuffer(pr); }
+                AddRecipient(dl, 1, "Mary Wong", "EX", "/O=EXAMPLECORP/OU=EXCHANGE ADMINISTRATIVE GROUP (FYDIBOHF23SPDLT)/CN=RECIPIENTS/CN=MARY.WONG", "mary.wong@example.com");
+                AddRecipient(dl, 1, "全體員工 All Staff", "EX", listDn, "");
+                Check(dl.SaveChanges(0), "SaveChanges");
+            }
+            finally { Marshal.ReleaseComObject(dl); }
+        }
+        {
+            IMAPIFolder hidden = Sub(ipmRoot, "Recipient Cache");
+            using (var c = new Block(new List<(uint, object)> { (PR_CONTAINER_CLASS_W, "IPF.Contact.RecipientCache"), (0x10F4000B, true) }))
+            { hidden.SetProps(c.Count, c.Ptr, out IntPtr pr); if (pr != IntPtr.Zero) Native.MAPIFreeBuffer(pr); }
+            hidden.SaveChanges(0);
+            folders["Recipient Cache"] = hidden;
+            ImportContact("Recipient Cache", new Dictionary<string, string> { ["displayName"] = "UAT 隱藏快取聯絡人", ["email"] = "cache@example.com" });
+            SaveNew("@Contacts", new List<(uint, object)>
+            {
+                (Tags.PR_MESSAGE_CLASS_W, "IPM.Contact"), (Tags.PR_SUBJECT_W, "UAT Exchange 聯絡人"), (Tags.PR_DISPLAY_NAME_W, "UAT Exchange 聯絡人"),
+                (Named(PSETID_Address, 0x8082, Tags.PT_UNICODE), "EX"), (Named(PSETID_Address, 0x8083, Tags.PT_UNICODE), "/O=EXAMPLECORP/CN=RECIPIENTS/CN=EX.CONTACT"),
+                (Named(PSETID_Address, 0x8084, Tags.PT_UNICODE), "ex.contact@example.com"), (Named(PSETID_Address, 0x8080, Tags.PT_UNICODE), "UAT Exchange 聯絡人"),
+            });
+        }
+        {
+            var big5 = System.Text.CodePagesEncodingProvider.Instance.GetEncoding(950)!;
+            SaveNew("@Inbox", new List<(uint, object)>
+            {
+                (Tags.PR_MESSAGE_CLASS_W, "IPM.Schedule.Meeting.Request"), (Tags.PR_SUBJECT_W, "UAT Y5 Big5 HTML 會議邀請"), (Tags.PR_MESSAGE_FLAGS, (int)MSGFLAG_READ),
+                (Tags.PR_MESSAGE_DELIVERY_TIME, when0), (Tags.PR_CLIENT_SUBMIT_TIME, when0), (0x3FDE0003, 950),
+                (0x10130102, big5.GetBytes("<html><body><p>繁體 Big5 內文：香港會議室</p></body></html>")),
+                (0x0C1E001F, "SMTP"), (0x0C1F001F, "big5@example.com.tw"), (0x0C1A001F, "Big5 Sender"),
+            });
+        }
+
+        // unusual folder names, an empty folder, a mail without dates, a 5 MB HTML body
+        Put(Sub(ipmRoot, "斜線/名稱 A/B"), "UAT X1 斜線 folder");
+        Put(Sub(ipmRoot, "尾空格與點. "), "UAT X2 尾空格 folder");
+        Put(Sub(ipmRoot, string.Concat(Enumerable.Repeat("很長的資料夾名稱", 15))), "UAT X3 長 folder 名");
+        Sub(Sub(ipmRoot, "空資料夾"), "空子資料夾");
+        {
+            IMAPIFolder x = Sub(ipmRoot, "特殊郵件");
+            Check(x.CreateMessage(IntPtr.Zero, 0, out IMessage nd), "CreateMessage");
+            try
+            {
+                using var b = new Block(new List<(uint, object)> { (Tags.PR_MESSAGE_CLASS_W, "IPM.Note"), (Tags.PR_SUBJECT_W, "UAT X4 冇日期"), (PR_BODY_W, "no dates"), (Tags.PR_MESSAGE_FLAGS, 0) });
+                Check(nd.SetProps(b.Count, b.Ptr, out IntPtr pr), "SetProps"); if (pr != IntPtr.Zero) Native.MAPIFreeBuffer(pr); Check(nd.SaveChanges(0), "SaveChanges");
+            }
+            finally { Marshal.ReleaseComObject(nd); }
+            Check(x.CreateMessage(IntPtr.Zero, 0, out IMessage big), "CreateMessage");
+            try
+            {
+                var sb = new System.Text.StringBuilder("<html><body>");
+                for (int i = 0; i < 60000; i++) sb.Append("<p>第 ").Append(i).Append(" 段：大型 HTML 內文 嘅㗎 測試。</p>");
+                sb.Append("</body></html>");
+                var p = Mail("UAT X5 5MB HTML 內文"); p.Add((0x10130102, System.Text.Encoding.UTF8.GetBytes(sb.ToString())));   // PR_HTML
+                using var b = new Block(p);
+                Check(big.SetProps(b.Count, b.Ptr, out IntPtr pr), "SetProps"); if (pr != IntPtr.Zero) Native.MAPIFreeBuffer(pr); Check(big.SaveChanges(0), "SaveChanges");
+            }
+            finally { Marshal.ReleaseComObject(big); }
+        }
 
         // ---- a mail whose attachment is another Outlook message (ATTACH_EMBEDDED_MSG) with its own file attachment
         Check(inboxF.CreateMessage(IntPtr.Zero, 0, out IMessage outer), "CreateMessage");

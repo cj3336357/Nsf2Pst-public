@@ -1,4 +1,4 @@
-// "import" / "list" / "counts" mode: writes EML files into a PST through Extended MAPI (64-bit Outlook).
+﻿// "import" / "list" / "counts" mode: writes EML files into a PST through Extended MAPI (64-bit Outlook).
 //   Nsf2Pst import <pst> <manifest.jsonl>   one JSON object per line: {"eml","folder","subject","read","received","sent"}
 //   Nsf2Pst list <pst>                       folders and messages, for checking
 //   Nsf2Pst counts <pst>                     "folder TAB items TAB unread", numbers only
@@ -20,7 +20,35 @@ internal static class PstTool
         {
             if (cmd == "pst-export" && !File.Exists(pst)) { Console.WriteLine("fatal: PST not found: " + pst); return 3; }
             if (cmd != "import" && File.Exists(pst) && CheckPst(pst) is string problem) { Console.WriteLine("fatal: " + problem); return 3; }
+            // Outlook's PST provider writes into every PST it opens (it refuses read-only files), so PST -> NSF reads a copy:
+            // the user's PST stays byte for byte unchanged
+            string? copy = null;
+            if (cmd == "pst-export")
+            {
+                string work = Path.GetFullPath(args.Length > 2 ? args[2] : Path.ChangeExtension(pst, null) + "_work");
+                Directory.CreateDirectory(work);
+                if (args.Length < 3) args = new[] { args[0], args[1], work };   // the work folder of the original, not of the copy
+                copy = Path.Combine(work, "source_copy.pst");
+                try { File.Copy(pst, copy, true); }
+                catch (IOException ex) { Console.WriteLine("fatal: the PST could not be copied to the work folder (free disk space?): " + ex.Message); return 3; }
+                Console.WriteLine("reading a copy of the PST (the original is not changed)");
+            }
+            try { return RunOn(copy ?? pst, cmd, args); }
+            finally { if (copy != null) try { File.Delete(copy); } catch { } }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("fatal: " + ex.Message);
+            return 3;
+        }
+    }
+
+    static int RunOn(string pst, string cmd, string[] args)
+    {
+        try
+        {
             using var store = new PstStore(pst);
+            store.ReadOnlyNames = cmd is "pst-export" or "counts" or "list";   // reading the user's PST: add nothing to it
             if (cmd == "list") { store.List(Console.Out); return 0; }
             if (cmd == "counts") { store.Counts(Console.Out); return 0; }
             if (cmd == "pst-export") return ExportPst(store, args.Length > 2 ? args[2] : Path.ChangeExtension(pst, null) + "_work");
@@ -97,6 +125,7 @@ internal static class PstTool
         var folders = store.AllFolders();
         int total = folders.Sum(f => f.Count);
         Console.WriteLine($"{folders.Count} folder(s), {total} item(s)");
+        if (store.SkippedFolders.Count > 0) Console.WriteLine("skipped hidden Outlook folders: " + string.Join(", ", store.SkippedFolders));
         using var manifest = new StreamWriter(Path.Combine(outDir, "manifest.jsonl"), false, new UTF8Encoding(false));
         using var log = new StreamWriter(Path.Combine(outDir, "export_log.csv"), false, new UTF8Encoding(true));
         log.WriteLine("NoteID,UNID,Form,Status,BodyRebuilt,Unread,Folders,Subject");
@@ -112,7 +141,8 @@ internal static class PstTool
                 failed++; done++;
                 log.WriteLine(Csv((++seq).ToString("X"), "", form, "FAILED: " + ex.Message, "", "", f.Target, subject));
             }
-            switch (f.Kind)
+            // a folder that cannot be read (e.g. a damaged contents table) is reported and the others are still converted
+            try { switch (f.Kind)
             {
                 case "contacts":
                     store.ExportContacts(f, fields =>
@@ -146,6 +176,7 @@ internal static class PstTool
                     }, (subject, ex) => Fail("IPM.Task", subject, ex));
                     break;
                 default:   // mail, sticky notes, journal: EML files
+                    if (!f.Target.StartsWith('@')) Line(new() { ["type"] = "folder", ["folder"] = f.Target });   // also empty folders
                     store.ExportFolder(f, emlDir, ref seq,
                         m =>
                         {
@@ -159,6 +190,12 @@ internal static class PstTool
                         },
                         (cls, subject, ex) => Fail(cls, subject, ex));
                     break;
+            } }
+            catch (Exception ex)
+            {
+                failed++;
+                log.WriteLine(Csv((++seq).ToString("X"), "", "(folder)", $"FAILED: folder not readable ({f.Count} item(s)): " + ex.Message, "", "", f.Target, f.Path));
+                Console.WriteLine($"FAILED folder {f.Path}: {ex.Message}");
             }
         }
         Console.WriteLine($"PROGRESS {total} {total}");

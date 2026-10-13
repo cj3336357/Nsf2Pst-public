@@ -1,4 +1,4 @@
-// PST -> NSF: MIME built from MAPI properties, for messages Outlook's converter refuses (MAPIToMIMEStm fails, e.g. on
+﻿// PST -> NSF: MIME built from MAPI properties, for messages Outlook's converter refuses (MAPIToMIMEStm fails, e.g. on
 // meeting requests of a PST without the Outlook calendar components, or on delivery reports). Keeps subject, sender,
 // recipients, dates, Message-ID, the HTML / plain text body, appointment details and the attachments stored by value.
 using System.Runtime.InteropServices;
@@ -18,7 +18,7 @@ internal sealed partial class PstStore
     static readonly Guid IID_IStream = new("0000000C-0000-0000-C000-000000000046");
 
     /// <summary>Writes the message as EML from its properties. Returns the number of attachments that could not be read.</summary>
-    int WriteMimeFromProps(IMessage msg, string cls, string eml)
+    int WriteMimeFromProps(IMessage msg, string cls, string eml, int htmlCodePage = 0)
     {
         var p = MsgProps(msg, Tags.PR_SUBJECT_W, PR_BODY_W, PR_HTML, PR_INTERNET_MESSAGE_ID, Tags.PR_CLIENT_SUBMIT_TIME, Tags.PR_MESSAGE_DELIVERY_TIME,
                          0x0042001F, 0x0064001F, 0x0065001F, 0x5D02001F, 0x0C1A001F, 0x0C1E001F, 0x0C1F001F, 0x5D01001F);
@@ -62,7 +62,7 @@ internal sealed partial class PstStore
             if (lines.Count > 0) text = string.Join("\r\n", lines) + "\r\n\r\n" + text;
         }
         builder.TextBody = text;
-        if (p.GetValueOrDefault(PR_HTML) is byte[] html && html.Length > 0) builder.HtmlBody = Encoding.UTF8.GetString(html);
+        if (p.GetValueOrDefault(PR_HTML) is byte[] html && html.Length > 0) builder.HtmlBody = HtmlEncoding(htmlCodePage).GetString(html);
 
         int missing = 0;
         if (msg.GetAttachmentTable(MAPI_UNICODE, out IMAPITable at) >= 0)
@@ -102,6 +102,13 @@ internal sealed partial class PstStore
         return missing;
     }
 
+    /// <summary>PR_HTML is stored in the message's code page (PR_INTERNET_CPID): Big5, GBK, 1252 ... UTF-8 when unknown.</summary>
+    static Encoding HtmlEncoding(int cpid)
+    {
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        try { return cpid > 0 ? Encoding.GetEncoding(cpid) : Encoding.UTF8; } catch { return Encoding.UTF8; }
+    }
+
     /// <summary>Attached Outlook messages (ATTACH_EMBEDDED_MSG) are written by the converter in the system's ANSI code page
     /// (GB2312 on a Simplified Chinese system), which loses characters such as 㗎 or 𨋢: PR_INTERNET_CPID set on the outer
     /// message does not reach them. Each one is converted again on its own as UTF-8 and replaces its message/rfc822 part.
@@ -116,9 +123,10 @@ internal sealed partial class PstStore
         if (embedded.Count == 0) return 0;
 
         MimeMessage outer;
-        using (var ms = new MemoryStream(File.ReadAllBytes(eml))) outer = MimeMessage.Load(ms);
+        outer = MimeMessage.Load(eml);
         var parts = outer.BodyParts.OfType<MessagePart>().Where(p => p.Message != null).ToList();
-        if (parts.Count < embedded.Count) return 0;   // cannot match them reliably: keep what the converter wrote
+        // an .eml attached as a file is a message part too: pair them only when the numbers agree
+        if (parts.Count != embedded.Count) return 0;   // cannot match them reliably: keep what the converter wrote
         int replaced = 0;
         IntPtr piid = Marshal.AllocHGlobal(16);
         try
@@ -148,7 +156,7 @@ internal sealed partial class PstStore
                         finally { Marshal.ReleaseComObject(inner); }
                     }
                     finally { Marshal.ReleaseComObject(att); }
-                    using (var ms = new MemoryStream(File.ReadAllBytes(tmp))) parts[i].Message = MimeMessage.Load(ms);
+                    using (var ms = new MemoryStream(File.ReadAllBytes(tmp))) parts[i].Message = MimeMessage.Load(ms);   // a temp file deleted right after: load fully
                     replaced++;
                 }
                 catch { /* keep the converter's version of this part */ }
@@ -173,7 +181,8 @@ internal sealed partial class PstStore
         {
             if (r.GetValueOrDefault(PR_ATTACH_NUM) is not uint num) continue;
             if (!(r.GetValueOrDefault(PR_ATTACH_METHOD) is uint m && m == 1)) { skipped++; continue; }
-            Check(msg.OpenAttach(num, IntPtr.Zero, 0, out IntPtr pa), "OpenAttach");
+            // one attachment that cannot be opened is counted, it must not lose the whole item
+            if (msg.OpenAttach(num, IntPtr.Zero, 0, out IntPtr pa) < 0 || pa == IntPtr.Zero) { skipped++; continue; }
             var att = (IMAPIProp)Marshal.GetObjectForIUnknown(pa);
             Marshal.Release(pa);
             try
@@ -183,7 +192,7 @@ internal sealed partial class PstStore
                               ?? ap.GetValueOrDefault(0x3001001Fu) as string ?? $"attachment{num + 1}";
                 Directory.CreateDirectory(dir);
                 string path = Path.Combine(dir, (result.Count + 1) + ".bin");
-                File.WriteAllBytes(path, ReadBinaryStream(att, PR_ATTACH_DATA_BIN));
+                using (var fs = File.Create(path)) CopyBinaryStream(att, PR_ATTACH_DATA_BIN, fs);   // streamed: no copy of a large file in memory
                 result.Add(new Dictionary<string, string> { ["path"] = path, ["name"] = name });
             }
             catch { skipped++; }
@@ -195,6 +204,14 @@ internal sealed partial class PstStore
     /// <summary>Reads a binary property through IStream (works for large values that GetProps does not return).</summary>
     static byte[] ReadBinaryStream(IMAPIProp obj, uint tag)
     {
+        using var ms = new MemoryStream();
+        CopyBinaryStream(obj, tag, ms);
+        return ms.ToArray();
+    }
+
+    /// <summary>Copies a binary property through IStream into a stream.</summary>
+    static void CopyBinaryStream(IMAPIProp obj, uint tag, Stream target)
+    {
         byte[] iid = IID_IStream.ToByteArray();
         IntPtr piid = Marshal.AllocHGlobal(16);
         try
@@ -205,7 +222,6 @@ internal sealed partial class PstStore
             Marshal.Release(ps);
             try
             {
-                using var ms = new MemoryStream();
                 var buf = new byte[65536];
                 IntPtr pRead = Marshal.AllocHGlobal(4);
                 try
@@ -215,11 +231,10 @@ internal sealed partial class PstStore
                         stm.Read(buf, buf.Length, pRead);
                         int n = Marshal.ReadInt32(pRead);
                         if (n <= 0) break;
-                        ms.Write(buf, 0, n);
+                        target.Write(buf, 0, n);
                     }
                 }
                 finally { Marshal.FreeHGlobal(pRead); }
-                return ms.ToArray();
             }
             finally { Marshal.ReleaseComObject(stm); }
         }

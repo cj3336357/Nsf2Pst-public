@@ -101,7 +101,7 @@ template (`mail12.ntf`, or the newest `mailNN.ntf` in the Notes data folder) and
 | Exchange addresses | Mail from Exchange accounts stores sender / recipients as X.500 (`EX`) addresses; the SMTP addresses the PST keeps next to them are used instead |
 | Meeting requests, reports | Messages Outlook's converter refuses (e.g. meeting requests, delivery reports) are rebuilt from their MAPI properties: subject, sender, recipients, date, body, the meeting's time and place, attachments |
 | Contacts | Outlook contacts -> Notes contacts (Person documents): names, e-mail, company, phones, business address, notes. Contact groups -> Notes personal groups (members as Internet addresses) |
-| Calendar | Appointments, all-day and multi-day events, reminders, private entries and repeating appointments (daily / weekly / monthly incl. "2nd Tuesday" and "last day" / yearly patterns, deleted occurrences, no end date), created with the Notes calendar API (`CalCreateEntry`); attachments of an appointment are added to the Notes entry. Attendees are kept as text in the description, so no invitations are sent. Changed single occurrences of a series keep the series' time; a series without an end date is expanded by Notes for about 10 years |
+| Calendar | Appointments, all-day and multi-day events, reminders, private entries and repeating appointments (daily / weekly / monthly incl. "2nd Tuesday", "last day" and "day 31" / yearly patterns, deleted occurrences, no end date), created with the Notes calendar API (`CalCreateEntry`) in the PC's time zone (incl. its DST rule); a moved or changed occurrence of a series becomes an entry of its own at its new time. Attachments and long descriptions are added to the Notes entry. Attendees are kept as text in the description, so no invitations are sent. A series without an end date is expanded by Notes for about 10 years |
 | Tasks | Outlook tasks -> personal Notes to dos (start, due, completed, progress, importance) |
 | Notes, journal | Sticky notes and journal entries are kept as documents in a folder of the same name |
 | Verification | Items and unread items per folder, PST vs NSF, in `summary.txt` / `summary.html` like the other direction |
@@ -112,6 +112,12 @@ Nsf2Pst.exe nsf-import      <new.nsf> <workdir>\manifest.jsonl [--server S] [--u
 Nsf2Pst.exe nsf-mark-unread <new.nsf> <workdir>\unread_ids.txt     # separate step, see below
 Nsf2Pst.exe nsf-counts      <new.nsf>                                # folder <TAB> items <TAB> unread
 ```
+
+`pst-export` reads a copy of the PST in the work folder: Outlook's PST provider writes into every PST it opens, so the
+original stays unchanged (allow free space for one more copy of the PST during the run). Hidden Outlook folders
+(Recipient Cache, GAL Contacts, Companies ...) are skipped. Folder names Notes cannot take are adjusted and listed in
+the log: names of the mail template's views become `<name> (Outlook)`, `(name)` becomes `（name）`, `|` becomes `¦`, and names
+longer than Notes allows (64 bytes per level, about 127 bytes in all) are shortened.
 
 The unread marks are written by their own process that uses only the Notes C API: a process that uses the Notes COM
 classes cannot shut Notes down cleanly, so an unread table written there would not reach the disk.

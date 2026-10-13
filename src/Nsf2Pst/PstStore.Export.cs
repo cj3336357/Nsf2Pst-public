@@ -19,6 +19,11 @@ internal sealed partial class PstStore
     static readonly uint PR_CONTAINER_CLASS = Tags.Tag(0x3613, Tags.PT_UNICODE);
     static readonly uint PR_COMMENT_W = Tags.Tag(0x3004, Tags.PT_UNICODE);
     static readonly uint PR_INTERNET_CPID = Tags.Tag(0x3FDE, Tags.PT_LONG);
+    const uint PR_ATTR_HIDDEN = 0x10F4000B;
+    static readonly string[] HiddenClasses =
+        { "IPF.Contact.RecipientCache", "IPF.Contact.GalContacts", "IPF.Contact.Company", "IPF.Contact.MOC", "IPF.Configuration" };
+    /// <summary>Folders AllFolders left out (hidden Outlook folders), for the log.</summary>
+    public List<string> SkippedFolders { get; } = new();
     static readonly Guid PSETID_Task = new("00062003-0000-0000-C000-000000000046");
     const uint PR_SENSITIVITY = 0x00360003, PR_IMPORTANCE = 0x00170003;
 
@@ -76,7 +81,7 @@ internal sealed partial class PstStore
     void Walk(IMAPIFolder parent, string parentPath, List<PstFolder> list, Dictionary<string, string> special)
     {
         Check(parent.GetHierarchyTable(MAPI_UNICODE, out IMAPITable hier), "GetHierarchyTable");
-        var subs = QueryAll(hier, Tags.PR_ENTRYID, Tags.PR_DISPLAY_NAME_W, PR_CONTAINER_CLASS, Tags.PR_CONTENT_COUNT, PR_COMMENT_W);
+        var subs = QueryAll(hier, Tags.PR_ENTRYID, Tags.PR_DISPLAY_NAME_W, PR_CONTAINER_CLASS, Tags.PR_CONTENT_COUNT, PR_COMMENT_W, PR_ATTR_HIDDEN);
         Marshal.ReleaseComObject(hier);
         foreach (var s in subs)
         {
@@ -84,6 +89,13 @@ internal sealed partial class PstStore
             string name = s.GetValueOrDefault(Tags.PR_DISPLAY_NAME_W) as string ?? "?";
             string path = parentPath.Length == 0 ? name : parentPath + "\\" + name;
             string cls = s.GetValueOrDefault(PR_CONTAINER_CLASS) as string ?? "";
+            // Outlook's own hidden folders (Recipient Cache, GAL Contacts, Companies, PersonMetadata, settings ...) hold no
+            // user data: their "contacts" are collected addresses and would flood the Notes contacts
+            if (s.GetValueOrDefault(PR_ATTR_HIDDEN) is true || HiddenClasses.Any(h => cls.StartsWith(h, StringComparison.OrdinalIgnoreCase)))
+            {
+                SkippedFolders.Add(path);
+                continue;
+            }
             int count = s.GetValueOrDefault(Tags.PR_CONTENT_COUNT) is uint c ? (int)c : 0;
             string kind = cls.StartsWith("IPF.Appointment", StringComparison.OrdinalIgnoreCase) ? "calendar"
                 : cls.StartsWith("IPF.Contact", StringComparison.OrdinalIgnoreCase) ? "contacts"
@@ -96,9 +108,13 @@ internal sealed partial class PstStore
                 : parentPath.Length == 0 && name is "Junk E-mail" or "Junk Email" or "垃圾電子郵件" or "垃圾郵件" ? "@Junk"
                 : kind switch { "calendar" => "@Calendar", "contacts" => "@Contacts", "tasks" => "@Tasks", _ => path };
             list.Add(new PstFolder(path, target, kind, eid, count));
-            IMAPIFolder child = OpenFolder(eid);
-            try { Walk(child, path, list, special); }
-            finally { Marshal.ReleaseComObject(child); }
+            try
+            {
+                IMAPIFolder child = OpenFolder(eid);
+                try { Walk(child, path, list, special); }
+                finally { Marshal.ReleaseComObject(child); }
+            }
+            catch (Exception ex) { Console.WriteLine($"FAILED subfolders of {path} not readable: {ex.Message}"); }   // keep going with the rest
         }
     }
 
@@ -131,8 +147,10 @@ internal sealed partial class PstStore
         finally { Marshal.ReleaseComObject(folder); }
     }
 
+    // named properties this PST has never used come back as property id 0 (read-only lookup): they are not requested at
+    // all, one invalid tag would fail the whole GetProps call
     Dictionary<uint, object?> MsgProps(IMessage msg, params uint[] tags) =>
-        Get(t => { int hr = msg.GetProps(t, MAPI_UNICODE, out uint c, out IntPtr p); return (hr, c, p); }, tags);
+        Get(t => { int hr = msg.GetProps(t, MAPI_UNICODE, out uint c, out IntPtr p); return (hr, c, p); }, tags.Where(x => (x >> 16) != 0).Distinct().ToArray());
 
     /// <summary>Writes every message of a mail / sticky-note / journal folder as EML into emlDir.</summary>
     public void ExportFolder(PstFolder f, string emlDir, ref int seq, Action<PstMessage> onMessage, Action<string, string, Exception> onError)
@@ -146,6 +164,8 @@ internal sealed partial class PstStore
                 string eml = Path.Combine(emlDir, (++n).ToString("D6") + ".eml");
                 // UTF-8 for the MIME output: without PR_INTERNET_CPID the converter falls back to the ANSI code page (GB2312 on a
                 // Simplified Chinese system), which loses Traditional Chinese characters. Changed in memory only, never saved.
+                // the message's own code page first: the HTML body (PR_HTML) is stored in it, the fallback below decodes with it
+                int originalCpid = MsgProps(msg, PR_INTERNET_CPID).GetValueOrDefault(PR_INTERNET_CPID) is uint oc ? (int)oc : 0;
                 using (var cp = new Block(new List<(uint, object)> { (PR_INTERNET_CPID, 65001) }))
                 {
                     msg.SetProps(cp.Count, cp.Ptr, out IntPtr prob);
@@ -165,7 +185,7 @@ internal sealed partial class PstStore
                 {
                     // Outlook's converter refuses some classes (meeting requests without the calendar components, reports):
                     // build the MIME from the message properties instead of losing the message
-                    int missing = WriteMimeFromProps(msg, cls, eml);
+                    int missing = WriteMimeFromProps(msg, cls, eml, originalCpid);
                     note = $"from MAPI properties (converter 0x{hr:X8})" + (missing > 0 ? $", {missing} attachment(s) not readable" : "");
                 }
                 else
@@ -177,7 +197,8 @@ internal sealed partial class PstStore
                 uint flags = r.GetValueOrDefault(Tags.PR_MESSAGE_FLAGS) is uint fl ? fl : 0;
                 var received = r.GetValueOrDefault(Tags.PR_MESSAGE_DELIVERY_TIME) as DateTimeOffset?;
                 var sent = r.GetValueOrDefault(Tags.PR_CLIENT_SUBMIT_TIME) as DateTimeOffset?;
-                bool draft = f.Kind == "mail" && (f.Target is "@Drafts" or "@Outbox" || (flags & MSGFLAG_UNSENT) != 0);
+                // only Drafts / Outbox: an unsent message filed in another folder would otherwise show in Notes' Drafts view as well
+                bool draft = f.Kind == "mail" && f.Target is "@Drafts" or "@Outbox";
                 bool read = (flags & MSGFLAG_READ) != 0 || f.Kind != "mail";
                 onMessage(new PstMessage(eml, f.Target is "@Outbox" ? "@Drafts" : f.Target, subject, read, received, sent, draft, cls, exFixed, note));
             },
@@ -197,7 +218,7 @@ internal sealed partial class PstStore
         var p = MsgProps(msg, 0x0C1E001F, 0x0C1F001F, 0x0C1A001F, 0x5D01001F, 0x0064001F, 0x0065001F, 0x0042001F, 0x5D02001F);
         string? S(uint tag) => p.GetValueOrDefault(tag) as string;
         bool anyEx = string.Equals(S(0x0C1E001F), "EX", StringComparison.OrdinalIgnoreCase) || string.Equals(S(0x0064001F), "EX", StringComparison.OrdinalIgnoreCase);
-        var recipients = new List<(uint type, MailboxAddress? box)>();
+        var recipients = new List<(uint type, MailboxAddress? box, string? name)>();
         if (msg.GetRecipientTable(MAPI_UNICODE, out IMAPITable table) >= 0)
         {
             try
@@ -207,7 +228,8 @@ internal sealed partial class PstStore
                     string? type = r.GetValueOrDefault(0x3002001Fu) as string;
                     anyEx |= string.Equals(type, "EX", StringComparison.OrdinalIgnoreCase);
                     recipients.Add((r.GetValueOrDefault(0x0C150003u) is uint t ? t : 1,
-                        Box(r.GetValueOrDefault(0x3001001Fu) as string, type, r.GetValueOrDefault(0x3003001Fu) as string, r.GetValueOrDefault(0x39FE001Fu) as string)));
+                        Box(r.GetValueOrDefault(0x3001001Fu) as string, type, r.GetValueOrDefault(0x3003001Fu) as string, r.GetValueOrDefault(0x39FE001Fu) as string),
+                        r.GetValueOrDefault(0x3001001Fu) as string));
                 }
             }
             finally { Marshal.ReleaseComObject(table); }
@@ -215,7 +237,7 @@ internal sealed partial class PstStore
         if (!anyEx) return 0;
 
         MimeMessage mime;
-        using (var ms = new MemoryStream(File.ReadAllBytes(eml))) mime = MimeMessage.Load(ms);
+        mime = MimeMessage.Load(eml);
         int fixedCount = 0;
         var from = Box(S(0x0042001F), S(0x0064001F), S(0x0065001F), S(0x5D02001F)) ?? Box(S(0x0C1A001F), S(0x0C1E001F), S(0x0C1F001F), S(0x5D01001F));
         var sender = Box(S(0x0C1A001F), S(0x0C1E001F), S(0x0C1F001F), S(0x5D01001F));
@@ -223,9 +245,19 @@ internal sealed partial class PstStore
         mime.Sender = sender != null && from != null && !string.Equals(sender.Address, from.Address, StringComparison.OrdinalIgnoreCase) ? sender : null;
         foreach (var (type, list) in new[] { (1u, mime.To), (2u, mime.Cc), (3u, mime.Bcc) })
         {
-            var boxes = recipients.Where(r => r.type == type && r.box != null).Select(r => r.box!).ToList();
-            if (boxes.Count == 0 && recipients.Any(r => r.type == type)) continue;   // nothing usable: keep what the converter wrote
-            list.Clear(); list.AddRange(boxes); fixedCount += boxes.Count;
+            var mine = recipients.Where(r => r.type == type).ToList();
+            if (!mine.Any(r => r.box != null)) continue;   // nothing usable: keep what the converter wrote
+            // recipients without an SMTP address (e.g. Exchange distribution lists) keep the converter's entry or their name
+            var converter = list.ToList();
+            var rebuilt = new List<InternetAddress>();
+            foreach (var (_, box, name) in mine)
+            {
+                if (box != null) { rebuilt.Add(box); fixedCount++; continue; }
+                var same = converter.FirstOrDefault(a => string.Equals(a.Name, name, StringComparison.OrdinalIgnoreCase));
+                if (same != null) rebuilt.Add(same);
+                else if (!string.IsNullOrWhiteSpace(name)) rebuilt.Add(new GroupAddress(name));   // "Name: ;" keeps the name visible
+            }
+            list.Clear(); list.AddRange(rebuilt);
         }
         using (var fs = File.Create(eml)) mime.WriteTo(fs);
         return fixedCount;
@@ -251,6 +283,7 @@ internal sealed partial class PstStore
     {
         uint fileUnder = Named(PSETID_Address, 0x8005, Tags.PT_UNICODE);
         uint email1 = Named(PSETID_Address, 0x8083, Tags.PT_UNICODE), email1Type = Named(PSETID_Address, 0x8082, Tags.PT_UNICODE);
+        uint email1Orig = Named(PSETID_Address, 0x8084, Tags.PT_UNICODE), email2Orig = Named(PSETID_Address, 0x8094, Tags.PT_UNICODE);   // original display name: the SMTP address for EX entries
         uint email2 = Named(PSETID_Address, 0x8093, Tags.PT_UNICODE), email2Type = Named(PSETID_Address, 0x8092, Tags.PT_UNICODE);
         uint street = Named(PSETID_Address, 0x8045, Tags.PT_UNICODE), city = Named(PSETID_Address, 0x8046, Tags.PT_UNICODE);
         uint state = Named(PSETID_Address, 0x8047, Tags.PT_UNICODE), zip = Named(PSETID_Address, 0x8048, Tags.PT_UNICODE), country = Named(PSETID_Address, 0x8049, Tags.PT_UNICODE);
@@ -276,7 +309,7 @@ internal sealed partial class PstStore
                 }
                 if (!cls.StartsWith("IPM.Contact", StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException("not a contact (" + cls + ")");
-                var tags = map.Select(m => m.tag).Concat(new[] { Tags.PR_DISPLAY_NAME_W, fileUnder, email1, email1Type, email2, email2Type, street, city, state, zip, country }).ToArray();
+                var tags = map.Select(m => m.tag).Concat(new[] { Tags.PR_DISPLAY_NAME_W, fileUnder, email1, email1Type, email2, email2Type, email1Orig, email2Orig, street, city, state, zip, country }).ToArray();
                 var p = MsgProps(msg, tags);
                 var fields = new Dictionary<string, string>();
                 foreach (var (key, tag) in map) if (Str(p, tag) is string v) fields[key] = v;
@@ -285,8 +318,11 @@ internal sealed partial class PstStore
                     if (Str(p, tag) is string v) fields[key] = v;
                 string? display = Str(p, Tags.PR_DISPLAY_NAME_W) ?? Str(p, fileUnder) ?? Str(r, Tags.PR_SUBJECT_W);
                 if (display != null) fields["displayName"] = display;
-                if (Str(p, email1) is string e1 && !string.Equals(Str(p, email1Type), "EX", StringComparison.OrdinalIgnoreCase)) fields["email"] = e1;
-                if (Str(p, email2) is string e2 && !string.Equals(Str(p, email2Type), "EX", StringComparison.OrdinalIgnoreCase)) fields[fields.ContainsKey("email") ? "email2" : "email"] = e2;
+                // an Exchange (EX) entry keeps an X.500 address; its SMTP address is usually in the original display name
+                string? Mail(uint addr, uint type, uint orig) => !string.Equals(Str(p, type), "EX", StringComparison.OrdinalIgnoreCase) ? Str(p, addr)
+                    : Str(p, orig) is string o && o.Contains('@') && !o.Contains(' ') ? o : null;
+                if (Mail(email1, email1Type, email1Orig) is string e1) fields["email"] = e1;
+                if (Mail(email2, email2Type, email2Orig) is string e2) fields[fields.ContainsKey("email") ? "email2" : "email"] = e2;
                 onContact(fields);
             },
             (r, ex) => onError(r.GetValueOrDefault(Tags.PR_SUBJECT_W) as string ?? "", ex));
@@ -350,7 +386,18 @@ internal sealed partial class PstStore
                 if (p.GetValueOrDefault(recurring) is true && p.GetValueOrDefault(recur) is byte[] blob)
                 {
                     var rec = Recurrence.Parse(blob);
-                    if (rec != null) { item["rrule"] = rec.Value.rrule; item["exdates"] = rec.Value.exdates; item["recurStartOffset"] = rec.Value.startOffset; }
+                    if (rec != null)
+                    {
+                        item["rrule"] = rec.Value.rrule; item["exdates"] = rec.Value.exdates; item["recurStartOffset"] = rec.Value.startOffset;
+                        // modified occurrences: separate entries at their new time (local, as in the PST)
+                        if (rec.Value.exceptions.Count > 0)
+                            item["modified"] = rec.Value.exceptions.Select(m => new Dictionary<string, object?>
+                            {
+                                ["start"] = new DateTimeOffset(DateTime.SpecifyKind(m.Start, DateTimeKind.Local)),
+                                ["end"] = new DateTimeOffset(DateTime.SpecifyKind(m.End < m.Start ? m.Start : m.End, DateTimeKind.Local)),
+                                ["subject"] = m.Subject, ["location"] = m.Location,
+                            }).ToList();
+                    }
                     else item["recurrenceNote"] = "unsupported pattern";
                 }
                 var atts = SaveAttachments(msg, Path.Combine(attDir, "cal" + (++seq) + "_" + Guid.NewGuid().ToString("N")[..6]), out int skippedAtt);
@@ -393,7 +440,10 @@ internal static class Recurrence
     static readonly DateTime Epoch = new(1601, 1, 1);
     static readonly string[] Days = { "SU", "MO", "TU", "WE", "TH", "FR", "SA" };
 
-    public static (string rrule, List<string> exdates, int startOffset)? Parse(byte[] b)
+    /// <summary>A modified occurrence: its new local start / end, and the subject / location if they were changed.</summary>
+    public sealed record Modified(DateTime Start, DateTime End, string? Subject, string? Location);
+
+    public static (string rrule, List<string> exdates, int startOffset, List<Modified> exceptions)? Parse(byte[] b)
     {
         try
         {
@@ -416,7 +466,7 @@ internal static class Recurrence
             }
             if (calendarType != 0 && calendarType != 1) return null;   // only the Gregorian calendar
             uint endType = U32(), count = U32();
-            U32();                                          // FirstDOW
+            uint firstDow = U32();
             uint deleted = U32();
             var deletedDates = new List<uint>();
             for (int i = 0; i < deleted; i++) deletedDates.Add(U32());
@@ -424,8 +474,10 @@ internal static class Recurrence
             pos += 4 * (int)modified;
             uint startDate = U32(), endDate = U32();
             // AppointmentRecurrencePattern
-            U32(); U32();                                   // reader / writer version 2
+            U32(); uint writer2 = U32();                    // reader / writer version 2
             uint startOffset = U32();                       // minutes after midnight
+            U32();                                          // EndTimeOffset
+            var exceptions = ReadExceptions(b, ref pos, writer2);
 
             var rule = new StringBuilder();
             string byDay = string.Join(",", Enumerable.Range(0, 7).Where(i => (weekDays & (1u << i)) != 0).Select(i => Days[i]));
@@ -437,7 +489,9 @@ internal static class Recurrence
                 case 0x1: rule.Append($"FREQ=WEEKLY;INTERVAL={Math.Max(1, period)};BYDAY={byDay}"); break;
                 case 0x2:
                     rule.Append(yearly ? $"FREQ=YEARLY;INTERVAL={Math.Max(1, period / 12)};BYMONTH={first.Month}" : $"FREQ=MONTHLY;INTERVAL={Math.Max(1, period)}");
-                    rule.Append($";BYMONTHDAY={dayOfMonth}"); break;
+                    // Outlook moves day 29-31 to the last day of a shorter month; BYMONTHDAY alone would skip those months
+                    rule.Append(dayOfMonth > 28 ? $";BYMONTHDAY={string.Join(",", Enumerable.Range(28, (int)dayOfMonth - 27))};BYSETPOS=-1" : $";BYMONTHDAY={dayOfMonth}");
+                    break;
                 case 0x4:
                     rule.Append(yearly ? $"FREQ=YEARLY;INTERVAL={Math.Max(1, period / 12)};BYMONTH={first.Month}" : $"FREQ=MONTHLY;INTERVAL={Math.Max(1, period)}");
                     rule.Append(";BYMONTHDAY=-1"); break;
@@ -447,10 +501,65 @@ internal static class Recurrence
             }
             if (endType == 0x2021) rule.Append($";UNTIL={Epoch.AddMinutes(endDate):yyyyMMdd}T235959");
             else if (endType == 0x2022) rule.Append($";COUNT={count}");
-            // deleted occurrences: local date + start time of the series
+            if (firstDow <= 6 && patternType == 0x1) rule.Append($";WKST={Days[firstDow]}");   // matters for multi-week patterns
+            // deleted occurrences (this list also holds the original dates of modified ones, which are added back
+            // as separate entries at their new time): local date + start time of the series
             var ex = deletedDates.Select(d => Epoch.AddMinutes(d).AddMinutes(startOffset).ToString("yyyyMMdd'T'HHmmss")).ToList();
-            return (rule.ToString(), ex, (int)startOffset);
+            return (rule.ToString(), ex, (int)startOffset, exceptions);
         }
         catch { return null; }
+    }
+
+    /// <summary>ExceptionInfo (and ExtendedException for Unicode subject / location) of the modified occurrences.</summary>
+    static List<Modified> ReadExceptions(byte[] b, ref int pos, uint writer2)
+    {
+        var list = new List<Modified>();
+        try
+        {
+            int p = pos;
+            ushort U16() { ushort v = BitConverter.ToUInt16(b, p); p += 2; return v; }
+            uint U32() { uint v = BitConverter.ToUInt32(b, p); p += 4; return v; }
+            int n = U16();
+            var flags = new List<ushort>();
+            for (int i = 0; i < n; i++)
+            {
+                DateTime s = Epoch.AddMinutes(U32()), e = Epoch.AddMinutes(U32());
+                U32();                                       // OriginalStartDate
+                ushort f = U16(); flags.Add(f);
+                string? subject = null, location = null;
+                if ((f & 0x0001) != 0) { U16(); int len = U16(); subject = Encoding.Default.GetString(b, p, len); p += len; }
+                if ((f & 0x0002) != 0) U32();                // MeetingType
+                if ((f & 0x0004) != 0) U32();                // ReminderDelta
+                if ((f & 0x0008) != 0) U32();                // ReminderSet
+                if ((f & 0x0010) != 0) { U16(); int len = U16(); location = Encoding.Default.GetString(b, p, len); p += len; }
+                if ((f & 0x0020) != 0) U32();                // BusyStatus
+                if ((f & 0x0040) != 0) U32();                // Attachment
+                if ((f & 0x0080) != 0) U32();                // SubType
+                if ((f & 0x0200) != 0) U32();                // AppointmentColor
+                list.Add(new Modified(s, e, subject, location));
+            }
+            p += 4 + (int)BitConverter.ToUInt32(b, p);       // ReservedBlock1
+            if (writer2 >= 0x3009)
+            {
+                // ExtendedException: the Unicode versions of a changed subject / location
+                for (int i = 0; i < n; i++)
+                {
+                    { uint ch = U32(); p += (int)ch; }        // ChangeHighlightSize + ChangeHighlight
+                    p += 4 + (int)BitConverter.ToUInt32(b, p); // ReservedBlockEE1
+                    if ((flags[i] & 0x0011) != 0)
+                    {
+                        p += 12;                              // StartDateTime, EndDateTime, OriginalStartDate
+                        string? subject = list[i].Subject, location = list[i].Location;
+                        if ((flags[i] & 0x0001) != 0) { int len = U16(); subject = Encoding.Unicode.GetString(b, p, 2 * len); p += 2 * len; }
+                        if ((flags[i] & 0x0010) != 0) { int len = U16(); location = Encoding.Unicode.GetString(b, p, 2 * len); p += 2 * len; }
+                        p += 4 + (int)BitConverter.ToUInt32(b, p);   // ReservedBlockEE2
+                        list[i] = list[i] with { Subject = subject, Location = location };
+                    }
+                }
+            }
+            pos = p;
+        }
+        catch { /* keep what was read: the ANSI subject / location, or the times only */ }
+        return list;
     }
 }

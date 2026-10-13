@@ -14,6 +14,9 @@ internal sealed partial class PstStore
     static readonly Guid PSETID_Address = new("00062004-0000-0000-C000-000000000046");
     readonly Dictionary<(Guid, int), uint> namedIds = new();
 
+    /// <summary>True while reading a PST: named properties are looked up, never created in the file.</summary>
+    public bool ReadOnlyNames { get; set; }
+
     const uint PR_CONTAINER_CLASS_W = 0x3613001F, PR_ICON_INDEX = 0x10800003, PR_BODY_W = 0x1000001F;
     const uint PR_START_DATE = 0x00600040, PR_END_DATE = 0x00610040;
 
@@ -33,10 +36,13 @@ internal sealed partial class PstStore
                 Marshal.WriteInt64(nameId, 16, 0);
                 Marshal.WriteInt32(nameId, 16, lid);
                 Marshal.WriteIntPtr(list, nameId);
-                Check(store!.GetIDsFromNames(1, list, 0x2 /* MAPI_CREATE */, out IntPtr tags), "GetIDsFromNames");
-                id = unchecked((uint)Marshal.ReadInt32(tags, 4)) >> 16;
-                Native.MAPIFreeBuffer(tags);
-                if (id == 0) throw new InvalidOperationException($"named property {set}/{lid:X} not available");
+                // reading a PST (PST -> NSF) must not add name mappings to the user's file: MAPI_CREATE only when writing
+                int hr = store!.GetIDsFromNames(1, list, ReadOnlyNames ? 0u : 0x2u /* MAPI_CREATE */, out IntPtr tags);
+                if (hr < 0 && !ReadOnlyNames) Check(hr, "GetIDsFromNames");
+                id = hr < 0 || tags == IntPtr.Zero ? 0 : unchecked((uint)Marshal.ReadInt32(tags, 4)) >> 16;
+                if (tags != IntPtr.Zero) Native.MAPIFreeBuffer(tags);
+                if (id == 0 && !ReadOnlyNames) throw new InvalidOperationException($"named property {set}/{lid:X} not available");
+                // not in this PST at all: tag 0 of the type, which no item has (reads return nothing)
                 namedIds[(set, lid)] = id;
             }
             finally { Marshal.FreeHGlobal(list); Marshal.FreeHGlobal(nameId); Marshal.FreeHGlobal(guid); }

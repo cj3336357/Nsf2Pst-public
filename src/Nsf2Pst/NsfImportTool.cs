@@ -107,21 +107,53 @@ internal static class NsfImportTool
             reserved.Add(vn.TrimStart('(').TrimEnd(')').TrimStart('$'));   // Notes finds "(Drafts)" by "Drafts" as well
             if (v.Aliases is object[] al) foreach (var a in al) if (a is string s && s.Length > 0) reserved.Add(s);
         }
+        // full PST folder path -> Notes folder path, for every path that had to change (written to folder_renames.txt)
         var renames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var topRenames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var owner = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);   // Notes path -> the PST path it was given to
         string MapFolder(string path)
         {
-            int cut = path.IndexOf('\\');
-            string top = cut < 0 ? path : path[..cut], rest = cut < 0 ? "" : path[cut..];
-            if (!reserved.Contains(top)) return path;
-            // subfolders of an English PST's "Deleted Items" stay under the Notes folder for deleted mail
-            if (cut >= 0 && top.Equals("Deleted Items", StringComparison.OrdinalIgnoreCase)) return path;
-            if (!renames.TryGetValue(top, out var renamed))
+            if (renames.TryGetValue(path, out var known)) return known;
+            // Notes hides a folder whose name is in parentheses and reads "|" as "title|alias": full-width brackets / ¦ instead
+            var segs = path.Split('\\').Select(s => s.Trim().Replace('|', '¦'))
+                .Select(s => s.Length > 1 && s[0] == '(' && s[^1] == ')' ? "（" + s[1..^1] + "）" : s)
+                .Select(s => s.Length == 0 ? "_" : s).ToList();
+            // names like the mail template's views get " (Outlook)"; subfolders of an English PST's "Deleted Items"
+            // stay under the Notes folder for deleted mail
+            string top = segs[0];
+            if (reserved.Contains(top) && !(segs.Count > 1 && top.Equals("Deleted Items", StringComparison.OrdinalIgnoreCase)))
             {
-                renamed = top + " (Outlook)";
-                for (int n = 2; reserved.Contains(renamed) || renames.ContainsValue(renamed); n++) renamed = $"{top} (Outlook {n})";
-                renames[top] = renamed;
+                if (!topRenames.TryGetValue(top, out var renamed))
+                {
+                    renamed = top + " (Outlook)";
+                    for (int n = 2; reserved.Contains(renamed) || topRenames.ContainsValue(renamed); n++) renamed = $"{top} (Outlook {n})";
+                    topRenames[top] = renamed;
+                }
+                segs[0] = renamed;
             }
-            return renamed + rest;
+            // Notes limits: 64 bytes per folder level, about 127 bytes for the whole path ("Name too long")
+            for (int i = 0; i < segs.Count; i++) segs[i] = Fit(segs[i], 64);
+            for (int i = segs.Count - 1; i >= 0 && Bytes(string.Join("\\", segs)) > 127; i--) segs[i] = Fit(segs[i], 12);
+            while (segs.Count > 2 && Bytes(string.Join("\\", segs)) > 127) { segs[^2] = Fit(segs[^2] + " " + segs[^1], 24); segs.RemoveAt(segs.Count - 1); }
+            string mapped = string.Join("\\", segs);
+            // a different PST folder may already have been shortened to the same name: number this one
+            string last = segs[^1];
+            for (int n = 2; owner.TryGetValue(mapped, out var other) && !other.Equals(path, StringComparison.OrdinalIgnoreCase); n++)
+            {
+                segs[^1] = Fit(last, 60) + " ~" + n;
+                mapped = string.Join("\\", segs);
+            }
+            owner[mapped] = path;
+            if (!mapped.Equals(path, StringComparison.Ordinal)) renames[path] = mapped;
+            return mapped;
+        }
+        static int Bytes(string s) => Encoding.UTF8.GetByteCount(s);   // LMBCS takes about as many bytes as UTF-8 for CJK
+        static string Fit(string s, int max)
+        {
+            if (Bytes(s) <= max) return s;
+            var sb = new StringBuilder();
+            foreach (var r in s.EnumerateRunes()) { if (Bytes(sb.ToString() + r) > max - 3) break; sb.Append(r); }
+            return sb.ToString().TrimEnd() + "…";
         }
 
         // read / unread marks belong to a user name: the mailbox owner, by default the Notes user running this
@@ -162,6 +194,13 @@ internal static class NsfImportTool
                         log.WriteLine(Csv((i + 1).ToString(), cid, folder, "contact", subject));
                         continue;
                     }
+                    if (type == "folder")
+                    {
+                        // every PST mail folder, also empty ones, so that the folder tree is complete
+                        db.EnableFolder(MapFolder(folder));
+                        log.WriteLine(Csv((i + 1).ToString(), "", folder, "folder", ""));
+                        continue;
+                    }
                     if (type == "group")
                     {
                         var members = r.TryGetProperty("members", out var mb) ? mb.EnumerateArray().Select(x => x.GetString() ?? "").Where(x => x.Length > 0).ToArray() : Array.Empty<string>();
@@ -175,8 +214,31 @@ internal static class NsfImportTool
                         // the Notes calendar API stores the entry like the Notes client does (repeat rules, alarm, busy time)
                         string uid = Guid.NewGuid().ToString("N") + "-nsf2pst";
                         CreateCalendar(cdb, EventICalendar(r, uid));
+                        string? longBody = Text(r, "body") is string lb && IsLongBody(lb) ? lb : null;
+                        if (longBody != null) WriteLongBody(session, db, uid, longBody);
                         appointments++; ok++;
                         string status = type;
+                        // modified occurrences of a series: their original dates are excluded from the series (EXDATE),
+                        // so each one is created as its own entry at its new time, with a changed subject / location
+                        if (r.TryGetProperty("modified", out var mods) && mods.ValueKind == JsonValueKind.Array)
+                        {
+                            int made = 0;
+                            foreach (var m in mods.EnumerateArray())
+                            {
+                                var d = new Dictionary<string, object?>();
+                                foreach (var prop in r.EnumerateObject())
+                                    if (prop.Name is not ("rrule" or "exdates" or "modified" or "attachments" or "recurStartOffset")) d[prop.Name] = prop.Value;
+                                d["start"] = m.GetProperty("start"); d["end"] = m.GetProperty("end");
+                                if (m.TryGetProperty("subject", out var ms) && ms.ValueKind == JsonValueKind.String) d["subject"] = ms.GetString();
+                                if (m.TryGetProperty("location", out var ml) && ml.ValueKind == JsonValueKind.String) d["location"] = ml.GetString();
+                                using var one = JsonDocument.Parse(JsonSerializer.Serialize(d));
+                                string uid2 = Guid.NewGuid().ToString("N") + "-nsf2pst";
+                                CreateCalendar(cdb, EventICalendar(one.RootElement, uid2));
+                                if (longBody != null) WriteLongBody(session, db, uid2, longBody);
+                                made++;
+                            }
+                            status += $" (+{made} modified occurrence(s))";
+                        }
                         var atts = PstTool.Attachments(r);
                         if (atts.Count > 0)
                         {
@@ -234,7 +296,7 @@ internal static class NsfImportTool
         }
         // unread marks are written by the next step (nsf-mark-unread, a separate C-API-only process; see there)
         File.WriteAllLines(Path.Combine(outDir, "folder_renames.txt"), renames.Select(kv => kv.Key + "\t" + kv.Value), new UTF8Encoding(false));
-        foreach (var kv in renames) Console.WriteLine($"folder renamed (a Notes view or folder has that name): {kv.Key} -> {kv.Value}");
+        foreach (var kv in renames) Console.WriteLine($"folder renamed for Notes (name of a template view, or too long): {kv.Key} -> {kv.Value}");
         string idFile = Path.Combine(outDir, "unread_ids.txt");
         File.WriteAllLines(idFile, new[] { "user=" + user }.Concat(unread.Select(x => x.ToString("X"))), new UTF8Encoding(false));
         Console.WriteLine($"PROGRESS {lines.Length} {lines.Length}");
@@ -291,30 +353,77 @@ internal static class NsfImportTool
     }
 
     // ---- calendar and to do (iCalendar for CalCreateEntry) ---------------------------------------------------------------
-    static string Esc(string s) => s.Replace("\\", "\\\\").Replace(";", "\\;").Replace(",", "\\,").Replace("\r\n", "\\n").Replace("\n", "\\n");
+    static string Esc(string s) => s.Replace("\\", "\\\\").Replace(";", "\\;").Replace(",", "\\,").Replace("\r\n", "\\n").Replace("\n", "\\n").Replace("\r", "\\n");
     static string Utc(DateTimeOffset d) => d.UtcDateTime.ToString("yyyyMMdd'T'HHmmss'Z'");
     static string? Text(JsonElement r, string name) => r.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String && v.GetString()!.Length > 0 ? v.GetString() : null;
+
+    const string TzId = "Nsf2Pst-Local";
+
+    /// <summary>The time zone of the PST's local times: this PC's zone (NSF2PST_TZ = a Windows zone id, for tests only).</summary>
+    static TimeZoneInfo LocalZone() =>
+        Environment.GetEnvironmentVariable("NSF2PST_TZ") is string id && id.Length > 0 ? TimeZoneInfo.FindSystemTimeZoneById(id) : TimeZoneInfo.Local;
+
+    /// <summary>VTIMEZONE for a zone: its current standard offset and, where it has one, its current DST rule.</summary>
+    static string VTimeZone(TimeZoneInfo tz)
+    {
+        static string Off(TimeSpan t) => (t < TimeSpan.Zero ? "-" : "+") + t.Duration().ToString("hhmm");
+        static string Rule(TimeZoneInfo.TransitionTime t) => t.IsFixedDateRule
+            ? $"FREQ=YEARLY;BYMONTH={t.Month};BYMONTHDAY={t.Day}"
+            : $"FREQ=YEARLY;BYMONTH={t.Month};BYDAY={(t.Week == 5 ? -1 : t.Week)}{new[] { "SU", "MO", "TU", "WE", "TH", "FR", "SA" }[(int)t.DayOfWeek]}";
+        var adj = tz.GetAdjustmentRules().LastOrDefault(a => a.DateEnd >= DateTime.Today && a.DateStart <= DateTime.Today);
+        TimeSpan std = tz.BaseUtcOffset + (adj?.BaseUtcOffsetDelta ?? TimeSpan.Zero);
+        var sb = new StringBuilder($"BEGIN:VTIMEZONE\r\nTZID:{TzId}\r\n");
+        if (adj == null || adj.DaylightDelta == TimeSpan.Zero || !tz.SupportsDaylightSavingTime)
+            sb.Append($"BEGIN:STANDARD\r\nDTSTART:19700101T000000\r\nTZOFFSETFROM:{Off(std)}\r\nTZOFFSETTO:{Off(std)}\r\nEND:STANDARD\r\n");
+        else
+        {
+            TimeSpan dst = std + adj.DaylightDelta;
+            var a = adj.DaylightTransitionStart; var b = adj.DaylightTransitionEnd;
+            sb.Append($"BEGIN:DAYLIGHT\r\nDTSTART:1970{a.Month:D2}01T{a.TimeOfDay:HHmmss}\r\nRRULE:{Rule(a)}\r\nTZOFFSETFROM:{Off(std)}\r\nTZOFFSETTO:{Off(dst)}\r\nEND:DAYLIGHT\r\n");
+            sb.Append($"BEGIN:STANDARD\r\nDTSTART:1970{b.Month:D2}01T{b.TimeOfDay:HHmmss}\r\nRRULE:{Rule(b)}\r\nTZOFFSETFROM:{Off(dst)}\r\nTZOFFSETTO:{Off(std)}\r\nEND:STANDARD\r\n");
+        }
+        return sb.Append("END:VTIMEZONE\r\n").ToString();
+    }
 
     static StringBuilder Begin(string component, string uid)
     {
         var sb = new StringBuilder();
         sb.Append("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Nsf2Pst//PST to NSF//EN\r\n");
+        sb.Append(VTimeZone(LocalZone()));
         sb.Append($"BEGIN:{component}\r\nUID:{uid}\r\nDTSTAMP:{Utc(DateTimeOffset.UtcNow)}\r\n");
         return sb;
     }
 
     /// <summary>CalCreateEntry takes no attachments: they are added to the new entry's rich text Body afterwards. The entry
     /// is found by the iCalendar UID Notes keeps in $ICAL_UID (the main document, not the instance children).</summary>
-    static void AttachToEntry(dynamic session, dynamic db, string uid, List<(string path, string name)> atts)
+    static bool IsLongBody(string body) => Encoding.UTF8.GetByteCount(body) > 30000;
+
+    /// <summary>The main document of a calendar entry just created with CalCreateEntry (by the UID in $ICAL_UID).</summary>
+    static dynamic FindEntry(dynamic session, dynamic db, string uid)
     {
-        // Search needs a cutoff date (it cannot take an empty value through COM): the entry was created just now
-        // "Today" keyword: independent of the system's date format. A cutoff of today or yesterday found nothing in tests,
-        // one far in the past works.
+        // Search needs a cutoff date (it cannot take an empty value through COM). "Today" keyword: independent of the
+        // system's date format. A cutoff of today or yesterday found nothing in tests, one far in the past works.
         dynamic since = session.CreateDateTime("Today");
         since.AdjustYear(-30);
         dynamic dc = db.Search($"$ICAL_UID = \"{uid}\" & !@IsResponseDoc", since, 0);
         dynamic? doc = dc.Count > 0 ? dc.GetFirstDocument() : null;
-        if (doc == null) throw new InvalidOperationException("calendar entry created, but not found to add its attachments");
+        return doc ?? throw new InvalidOperationException("calendar entry created, but not found again to complete it");
+    }
+
+    /// <summary>Writes a long description (left out of the iCalendar text) into the entry's rich text Body.</summary>
+    static void WriteLongBody(dynamic session, dynamic db, string uid, string text)
+    {
+        dynamic doc = FindEntry(session, db, uid);
+        if ((bool)doc.HasItem("Body")) doc.RemoveItem("Body");
+        dynamic rt = doc.CreateRichTextItem("Body");
+        string[] lines = text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+        for (int k = 0; k < lines.Length; k++) { if (k > 0) rt.AddNewLine(1); if (lines[k].Length > 0) rt.AppendText(lines[k]); }
+        doc.Save(true, false);
+    }
+
+    static void AttachToEntry(dynamic session, dynamic db, string uid, List<(string path, string name)> atts)
+    {
+        dynamic doc = FindEntry(session, db, uid);
         dynamic body = doc.GetFirstItem("Body");
         if (body == null || (int)body.Type != 1) body = doc.CreateRichTextItem("Body");
         string tmp = Path.Combine(Path.GetTempPath(), "nsf2pst_att_" + Guid.NewGuid().ToString("N"));
@@ -345,26 +454,34 @@ internal static class NsfImportTool
         DateTimeOffset start = r.GetProperty("start").GetDateTimeOffset(), end = r.TryGetProperty("end", out var e) ? e.GetDateTimeOffset() : start;
         bool allDay = r.TryGetProperty("allDay", out var ad) && ad.GetBoolean();
         string? rrule = Text(r, "rrule");
+        TimeZoneInfo tz = LocalZone();
+        DateTime Local(DateTimeOffset d) => TimeZoneInfo.ConvertTime(d, tz).DateTime;
         if (allDay)
         {
-            DateTime s = start.LocalDateTime.Date, en = end.LocalDateTime.Date;
+            DateTime s = Local(start).Date, en = Local(end).Date;
             if (en <= s) en = s.AddDays(1);
             sb.Append($"DTSTART;VALUE=DATE:{s:yyyyMMdd}\r\nDTEND;VALUE=DATE:{en:yyyyMMdd}\r\n");
         }
-        else
+        else if (rrule == null)
             // UTC (a time without a zone is read as UTC by Notes, which moved the first occurrence by the UTC offset)
             sb.Append($"DTSTART:{Utc(start)}\r\nDTEND:{Utc(end < start ? start : end)}\r\n");
+        else
+            // a repeating entry is expanded in the time zone of DTSTART: in UTC, a Monday 07:30 meeting in Hong Kong would
+            // be Sunday 23:30Z and every occurrence would land on a Tuesday; DST changes would shift it by an hour
+            sb.Append($"DTSTART;TZID={TzId}:{Local(start):yyyyMMdd'T'HHmmss}\r\nDTEND;TZID={TzId}:{Local(end < start ? start : end):yyyyMMdd'T'HHmmss}\r\n");
         if (rrule != null)
         {
-            // the pattern holds local times (UNTIL, deleted occurrences): written in UTC like DTSTART
-            static string ToUtc(string local) => Utc(new DateTimeOffset(DateTime.ParseExact(local, "yyyyMMdd'T'HHmmss", System.Globalization.CultureInfo.InvariantCulture)));
-            if (!allDay) rrule = System.Text.RegularExpressions.Regex.Replace(rrule, @"UNTIL=(\d{8}T\d{6})", m => "UNTIL=" + ToUtc(m.Groups[1].Value));
+            // the pattern holds local times (UNTIL, deleted occurrences). UNTIL: a date for all-day series, else UTC (RFC 5545)
+            string ToUtc(string local) => Utc(new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(
+                DateTime.SpecifyKind(DateTime.ParseExact(local, "yyyyMMdd'T'HHmmss", System.Globalization.CultureInfo.InvariantCulture), DateTimeKind.Unspecified), tz)));
+            rrule = System.Text.RegularExpressions.Regex.Replace(rrule, @"UNTIL=(\d{8})T(\d{6})", m => "UNTIL=" + (allDay ? m.Groups[1].Value : ToUtc(m.Groups[1].Value + "T" + m.Groups[2].Value)));
             sb.Append($"RRULE:{rrule}\r\n");
             if (r.TryGetProperty("exdates", out var ex) && ex.ValueKind == JsonValueKind.Array)
-                foreach (var x in ex.EnumerateArray()) sb.Append(allDay ? $"EXDATE;VALUE=DATE:{x.GetString()![..8]}\r\n" : $"EXDATE:{ToUtc(x.GetString()!)}\r\n");
+                foreach (var x in ex.EnumerateArray()) sb.Append(allDay ? $"EXDATE;VALUE=DATE:{x.GetString()![..8]}\r\n" : $"EXDATE;TZID={TzId}:{x.GetString()}\r\n");
         }
         if (Text(r, "location") is string loc) sb.Append($"LOCATION:{Esc(loc)}\r\n");
-        if (Text(r, "body") is string body) sb.Append($"DESCRIPTION:{Esc(body)}\r\n");
+        // CalCreateEntry replaces a DESCRIPTION over about 32 KB with a notice: a long text is written to the entry afterwards
+        if (Text(r, "body") is string body && !IsLongBody(body)) sb.Append($"DESCRIPTION:{Esc(body)}\r\n");
         if (r.TryGetProperty("tentative", out var tt) && tt.GetBoolean()) sb.Append("STATUS:TENTATIVE\r\n");
         if (r.TryGetProperty("private", out var pv) && pv.GetBoolean()) sb.Append("CLASS:PRIVATE\r\n");
         if (allDay) sb.Append("TRANSP:TRANSPARENT\r\n");

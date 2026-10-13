@@ -951,11 +951,14 @@ internal sealed class MainForm : Form
         {
             if (string.IsNullOrWhiteSpace(line)) continue;
             using var j = JsonDocument.Parse(line);
+            if (j.RootElement.TryGetProperty("type", out var ty) && ty.GetString() == "folder") continue;   // folder list, not an item
             string f = j.RootElement.GetProperty("folder").GetString() ?? "";
             if (f.StartsWith('@')) f = "(default folders)";
             bool unread = j.RootElement.TryGetProperty("read", out var r) && !r.GetBoolean();
+            // PST -> NSF: each modified occurrence of a repeating appointment becomes an entry of its own
+            int items = 1 + (j.RootElement.TryGetProperty("modified", out var mods) && mods.ValueKind == JsonValueKind.Array ? mods.GetArrayLength() : 0);
             var e = expected.GetValueOrDefault(f);
-            expected[f] = (e.total + 1, e.unread + (unread ? 1 : 0));
+            expected[f] = (e.total + items, e.unread + (unread ? 1 : 0));
         }
         // PST -> NSF renames folders that clash with the mail template ("Calendar" -> "Calendar (Outlook)"): compare by the PST name
         var renames = new List<(string from, string to)>();

@@ -94,14 +94,24 @@ internal static class NotesApi
         yield return @"C:\Program Files\HCL\Notes";
     }
 
+    /// <summary>UTF-16 -> LMBCS, NUL terminated. OSTranslate takes 16-bit lengths, so the text is translated in pieces
+    /// (LMBCS has no shift state, the pieces can be joined); a piece never splits a surrogate pair.</summary>
     public static byte[] Lmbcs(string s)
     {
-        byte[] u8 = Encoding.UTF8.GetBytes(s);
-        byte[] outBuf = new byte[u8.Length * 3 + 2];
-        ushort n = OSTranslate(OS_TRANSLATE_UTF8_TO_LMBCS, u8, (ushort)u8.Length, outBuf, (ushort)(outBuf.Length - 1));
-        Array.Resize(ref outBuf, n + 1);   // NUL terminated
-        outBuf[n] = 0;
-        return outBuf;
+        const int piece = 8000;   // chars: at most 32,000 UTF-8 bytes, and the LMBCS output fits the 65,535-byte buffer
+        var result = new List<byte>(s.Length * 2 + 1);
+        for (int i = 0; i < s.Length;)
+        {
+            int len = Math.Min(piece, s.Length - i);
+            if (i + len < s.Length && char.IsHighSurrogate(s[i + len - 1])) len--;
+            byte[] u8 = Encoding.UTF8.GetBytes(s, i, len);
+            byte[] outBuf = new byte[Math.Min(65535, u8.Length * 3 + 2)];
+            ushort n = OSTranslate(OS_TRANSLATE_UTF8_TO_LMBCS, u8, (ushort)u8.Length, outBuf, (ushort)(outBuf.Length - 1));
+            result.AddRange(outBuf.AsSpan(0, n).ToArray());
+            i += len;
+        }
+        result.Add(0);
+        return result.ToArray();
     }
 
     static string Error(ushort status)
@@ -233,15 +243,18 @@ internal static class NotesApi
             Check(MIMEStreamOpen(hNote, body, bodyLen, MIME_STREAM_OPEN_WRITE, out IntPtr stream), "MIMEStreamOpen");
             try
             {
-                byte[] all = File.ReadAllBytes(emlFile);
+                // streamed in 32 KB pieces: a mail with a very large attachment is never held in memory as a whole
                 const int chunk = 32 * 1024;
-                for (int pos = 0; pos < all.Length; pos += chunk)
+                byte[] part = new byte[chunk];
+                using (var fs = new FileStream(emlFile, FileMode.Open, FileAccess.Read, FileShare.Read, chunk))
                 {
-                    int n = Math.Min(chunk, all.Length - pos);
-                    byte[] part = new byte[n];
-                    Buffer.BlockCopy(all, pos, part, 0, n);
-                    int rc = MIMEStreamWrite(part, (ushort)n, stream);
-                    if (rc != 0) throw new InvalidOperationException($"MIMEStreamWrite: {rc}");
+                    int n;
+                    while ((n = fs.Read(part, 0, chunk)) > 0)
+                    {
+                        byte[] piece = n == chunk ? part : part[..n];
+                        int rc = MIMEStreamWrite(piece, (ushort)n, stream);
+                        if (rc != 0) throw new InvalidOperationException($"MIMEStreamWrite: {rc}");
+                    }
                 }
                 Check(MIMEStreamItemize(hNote, body, bodyLen, MIME_STREAM_ITEMIZE_FULL, stream), "MIMEStreamItemize");
             }
