@@ -100,6 +100,12 @@ internal sealed partial class PstStore : IDisposable
         IMAPIFolder parent = cut < 0 ? ipmRoot : Folder(path[..cut]);
         string name = cut < 0 ? path : path[(cut + 1)..];
         Check(parent.CreateFolder(FOLDER_GENERIC, name, null, IntPtr.Zero, OPEN_IF_EXISTS | MAPI_UNICODE, out IMAPIFolder child), $"CreateFolder({path})");
+        if (path == "Unfiled")   // mail that was in no Notes folder: marked so that PST -> NSF leaves it unfiled again
+        {
+            using var c = new Block(new List<(uint, object)> { (Tags.Tag(0x3004, Tags.PT_UNICODE), UnfiledMarker) });
+            if (child.SetProps(c.Count, c.Ptr, out IntPtr prob) >= 0) child.SaveChanges(KEEP_OPEN_READWRITE);
+            if (prob != IntPtr.Zero) Native.MAPIFreeBuffer(prob);
+        }
         folders[path] = child;
         return child;
     }

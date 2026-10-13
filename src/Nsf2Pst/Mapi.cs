@@ -1,4 +1,4 @@
-// Minimal Extended MAPI interop for writing PST files (x64 Outlook / OLMAPI32.DLL).
+﻿// Minimal Extended MAPI interop for writing PST files (x64 Outlook / OLMAPI32.DLL).
 // Interfaces are declared in the vtable order of the Windows SDK / Outlook MAPI headers (mapidefs.h, mapix.h, mimeole.h).
 // Every method returns the raw HRESULT ([PreserveSig]); complex parameters are passed as IntPtr and marshalled by hand.
 using System.Runtime.InteropServices;
@@ -17,6 +17,7 @@ internal static class Native
     public static extern int MAPILogonEx(IntPtr ulUIParam, string lpszProfileName, string? lpszPassword, uint flFlags, out IMAPISession lppSession);
     [DllImport(Dll)] public static extern int MAPIFreeBuffer(IntPtr lpBuffer);
     [DllImport(Dll)] public static extern int MAPIAllocateBuffer(uint cbSize, out IntPtr lppBuffer);
+    [DllImport(Dll)] public static extern int MAPIAllocateMore(uint cbSize, IntPtr lpObject, out IntPtr lppBuffer);
     [DllImport(Dll)] public static extern void FreeProws(IntPtr lpRows);
     [DllImport(Dll, EntryPoint = "DllGetClassObject")]
     public static extern int OlmapiDllGetClassObject(ref Guid rclsid, ref Guid riid, out IClassFactory ppv);
@@ -41,7 +42,7 @@ internal static class Tags
 {
     // property types
     public const uint PT_LONG = 0x0003, PT_UNICODE = 0x001F, PT_SYSTIME = 0x0040, PT_BINARY = 0x0102, PT_STRING8 = 0x001E;
-    public const uint PT_BOOLEAN = 0x000B, PT_MV_LONG = 0x1003;
+    public const uint PT_BOOLEAN = 0x000B, PT_MV_LONG = 0x1003, PT_MV_BINARY = 0x1102;
     public static uint Tag(uint id, uint type) => (id << 16) | type;
 
     public static readonly uint PR_ENTRYID = Tag(0x0FFF, PT_BINARY);
@@ -233,9 +234,22 @@ internal interface IMessage
     [PreserveSig] int OpenProperty(uint tag, IntPtr iid, uint a, uint b, out IntPtr obj);
     [PreserveSig] int SetProps(uint count, IntPtr props, out IntPtr problems);
     [PreserveSig] int DeleteProps(IntPtr tags, out IntPtr problems);
+    [PreserveSig] int CopyTo(uint a, IntPtr b, IntPtr c, IntPtr d, IntPtr e, IntPtr f, IntPtr g, uint h, out IntPtr i);
+    [PreserveSig] int CopyProps(IntPtr a, IntPtr b, IntPtr c, IntPtr d, IntPtr e, IntPtr f, uint g, out IntPtr h);
+    [PreserveSig] int GetNamesFromIDs(IntPtr a, IntPtr b, uint c, out uint d, out IntPtr e);
+    [PreserveSig] int GetIDsFromNames(uint a, IntPtr b, uint c, out IntPtr d);
+    // IMessage
+    [PreserveSig] int GetAttachmentTable(uint flags, out IMAPITable table);
+    [PreserveSig] int OpenAttach(uint num, IntPtr iid, uint flags, out IntPtr attach);
+    [PreserveSig] int CreateAttach(IntPtr iid, uint flags, out uint num, out IntPtr attach);
+    [PreserveSig] int DeleteAttach(uint num, IntPtr uiParam, IntPtr progress, uint flags);
+    [PreserveSig] int GetRecipientTable(uint flags, out IMAPITable table);
+    [PreserveSig] int ModifyRecipients(uint flags, IntPtr adrList);
+    [PreserveSig] int SubmitMessage(uint flags);
+    [PreserveSig] int SetReadFlag(uint flags);
 }
 
-/// <summary>Outlook MIME converter (mimeole.h). Only MIMEToMAPI is used.</summary>
+/// <summary>Outlook MIME converter (mimeole.h): MIMEToMAPI for NSF -> PST, MAPIToMIMEStm for PST -> NSF.</summary>
 [ComImport, Guid("4B401570-B77B-11D0-9DA5-00C04FD65685"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 internal interface IConverterSession
 {
@@ -243,4 +257,5 @@ internal interface IConverterSession
     [PreserveSig] int SetEncoding(int et);
     [PreserveSig] int PlaceHolder1();
     [PreserveSig] int MIMEToMAPI(IStream stm, IMessage msg, IntPtr srcSrv, uint flags);
+    [PreserveSig] int MAPIToMIMEStm(IMessage msg, IStream stm, uint flags);
 }

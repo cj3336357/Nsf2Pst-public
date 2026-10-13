@@ -13,8 +13,8 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <ApplicationIcon>app.ico</ApplicationIcon>
     <Product>Nsf2Pst</Product>
-    <Description>Converts HCL Notes mail files (NSF) to Outlook PST</Description>
-    <Version>1.1.0</Version>
+    <Description>Converts HCL Notes mail files (NSF) to Outlook PST and back</Description>
+    <Version>1.2.0</Version>
   </PropertyGroup>
 
   <ItemGroup>

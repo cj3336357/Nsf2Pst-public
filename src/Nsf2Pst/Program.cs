@@ -2,6 +2,7 @@
 //   Nsf2Pst.exe                 opens the window
 //   Nsf2Pst.exe export ...      Notes side   (run by the window as a child process)
 //   Nsf2Pst.exe import|list|counts ...  PST side (run by the window as a separate child process)
+//   PST -> NSF: pst-export (PST side), then nsf-import, nsf-mark-unread, nsf-counts (Notes side)
 // The Notes and Outlook parts always run in different processes so their DLLs never meet.
 using System.Runtime.InteropServices;
 using System.Text;
@@ -36,7 +37,8 @@ internal static class Program
             return args[0].ToLowerInvariant() switch
             {
                 "export" or "mark-unread" => ExportTool.Run(args),
-                "import" or "list" or "counts" => PstTool.Run(args),
+                "import" or "list" or "counts" or "pst-export" or "pst-make-test" or "pst-make-uat" => PstTool.Run(args),
+                "nsf-import" or "nsf-counts" or "nsf-mark-unread" => NsfImportTool.Run(args),
                 _ => Usage(),
             };
         }
@@ -49,7 +51,7 @@ internal static class Program
 
     static int Usage()
     {
-        Console.WriteLine("Nsf2Pst.exe (no arguments) opens the window; command line: export | import | list | counts");
+        Console.WriteLine("Nsf2Pst.exe (no arguments) opens the window; command line: export | import | list | counts | pst-export | nsf-import | nsf-mark-unread | nsf-counts");
         return 2;
     }
 }

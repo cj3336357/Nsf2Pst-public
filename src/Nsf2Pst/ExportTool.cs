@@ -74,6 +74,7 @@ internal static class ExportTool
         {
             ["($Inbox)"] = "@Inbox", ["($Sent)"] = "@Sent", ["($Drafts)"] = "@Drafts", ["($SoftDeletions)"] = "@Deleted",
             ["($JunkMail)"] = "Junk E-mail",
+            ["Deleted Items"] = "@Deleted",   // the folder PST -> NSF puts Outlook's deleted mail into: back to Outlook's own folder
         };
         var systemFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         { "(Rules)", "(Group Calendars)", "(Drafts)", "(Sent)", "(Stationery)", "(Mail Threads)" };

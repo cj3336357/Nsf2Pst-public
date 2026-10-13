@@ -46,6 +46,17 @@ internal sealed class MainForm : Form
     bool stopRequested;
     string workDir = "", statusBase = "";
 
+    // ---- direction: NSF -> PST (default) or PST -> NSF. txtNsf / txtPst keep their names (UI Automation ids) and always
+    // hold the SOURCE / the OUTPUT file: in PST -> NSF mode txtNsf holds the PST and txtPst the new NSF.
+    static bool Rev;
+    static string D(string nsfZh, string nsfEn, string pstZh, string pstEn) => Rev ? L(pstZh, pstEn) : L(nsfZh, nsfEn);
+    readonly Segmented seg = new(L("NSF → PST", "NSF → PST"), L("PST → NSF", "PST → NSF")) { Name = "segDirection" };
+    readonly Label lblHeading = new(), lblSub = new(), lblUpText = new(), lblUpHint = new(), lblOutLabel = new(), lblFoot = new(), lblSubTitle = new();
+    readonly Label hintServer = new(), hintUser = new();
+    readonly List<Control> nsfOnly = new();   // advanced rows that only apply to NSF -> PST (directory, ID, password)
+    Wordmark wordmark = null!;
+    Action layoutDrop = () => { };
+
     // ---- view parts
     readonly Panel host = new() { Dock = DockStyle.Fill, AutoScroll = true };
     TableLayoutPanel viewSetup = null!, viewRun = null!, viewDone = null!;
@@ -90,6 +101,7 @@ internal sealed class MainForm : Form
         KeyPreview = true;
 
         foreach (var b in new[] { btnStart, btnStop, btnOpenOut, btnOpenLog, btnSummary, btnAgain, btnNsf, btnPst, btnId, btnDir, btnLang, btnTheme }) b.Fit();
+        seg.Fit();
         BuildSetup(); BuildRun(); BuildDone();
         host.BackColor = Th.Back;
         host.Resize += (_, _) => { int side = Math.Max(S(28), (host.ClientSize.Width - S(820)) / 2); host.Padding = new Padding(side, S(26), side, S(26)); };
@@ -151,7 +163,7 @@ internal sealed class MainForm : Form
             if (c.adv) ToggleAdvanced();
             carry = null;
         }
-        NsfChanged(); UpdateAdvSummary();
+        ApplyDirection();
     }
 
     /// <summary>Saves the choice and closes; Program opens a new window with the same field values.</summary>
@@ -174,8 +186,9 @@ internal sealed class MainForm : Form
         var bar = new Panel { Dock = DockStyle.Top, Height = S(68), BackColor = Th.Surface };
         bar.Paint += (_, e) => { using var p = new Pen(Th.Line); e.Graphics.DrawLine(p, 0, bar.Height - 1, bar.Width, bar.Height - 1); };
         var logo = new IconBadge(Ico.Mail, badge: true) { Size = new Size(S(40), S(40)), Location = new Point(S(24), S(14)) };
-        var title = new Wordmark { Location = new Point(S(76), S(11)), BackColor = Th.Surface };
-        var sub = new Label { Text = L("Notes 郵箱 (NSF) 轉 Outlook PST", "Notes mailbox (NSF) to Outlook PST"), Font = Th.Ui(9f), ForeColor = Th.Muted, AutoSize = true, Location = new Point(S(76), S(40)), BackColor = Th.Surface };
+        var title = wordmark = new Wordmark { Location = new Point(S(76), S(11)), BackColor = Th.Surface };
+        var sub = lblSubTitle;
+        sub.Font = Th.Ui(9f); sub.ForeColor = Th.Muted; sub.AutoSize = true; sub.Location = new Point(S(76), S(40)); sub.BackColor = Th.Surface;
         lblEnv.AutoSize = true; lblEnv.Font = Th.Ui(9f); lblEnv.ForeColor = Th.Muted; lblEnv.BackColor = Th.Surface; lblEnv.Text = L("檢查環境中 ...", "Checking environment ...");
         bar.Controls.AddRange(new Control[] { logo, title, sub, lblEnv, btnLang, btnTheme });
         void Place()
@@ -241,9 +254,13 @@ internal sealed class MainForm : Form
     void BuildSetup()
     {
         viewSetup = Column();
-        viewSetup.Controls.Add(Heading(L("選擇要轉換嘅郵箱", "Choose a mailbox to convert")));
-        viewSetup.Controls.Add(SubText(L("郵件、資料夾、已讀/未讀、聯絡人、日曆同加密郵件，一次過轉入 Outlook PST。",
-                                         "Mail, folders, read/unread state, contacts, calendar and encrypted mail, all into one Outlook PST.")));
+        seg.Margin = new Padding(0, 0, 0, S(18));
+        seg.Changed += () => { if (child == null) { Rev = seg.Index == 1; txtNsf.Text = ""; txtPst.Text = ""; ApplyDirection(); } };
+        viewSetup.Controls.Add(seg);
+        lblHeading.Font = Th.Ui(17f, FontStyle.Bold); lblHeading.ForeColor = Th.Text; lblHeading.AutoSize = true; lblHeading.Margin = new Padding(0, 0, 0, S(2)); lblHeading.BackColor = Th.Back;
+        lblSub.Font = Th.Ui(9.75f); lblSub.ForeColor = Th.Muted; lblSub.AutoSize = true; lblSub.Margin = new Padding(0, 0, 0, S(18)); lblSub.BackColor = Th.Back;
+        viewSetup.Controls.Add(lblHeading);
+        viewSetup.Controls.Add(lblSub);
 
         lblEnvWarn.AutoSize = false; lblEnvWarn.Dock = DockStyle.Top; lblEnvWarn.Height = S(40); lblEnvWarn.Visible = false;
         lblEnvWarn.BackColor = Th.BadSoft; lblEnvWarn.ForeColor = Th.Bad; lblEnvWarn.Font = Th.Ui(9.5f, FontStyle.Bold);
@@ -255,10 +272,10 @@ internal sealed class MainForm : Form
         dropZone.DragEnter += OnDragEnter; dropZone.DragDrop += OnDragDrop; dropZone.DragLeave += (_, _) => DropHighlight(false);
         dropEmpty.Dock = DockStyle.Fill; dropEmpty.BackColor = Th.Surface;
         var upIcon = new Label { Text = Ico.Upload, Font = Ico.Font(26f), ForeColor = Th.Accent, AutoSize = true, BackColor = Th.Surface };
-        var upText = new Label { Text = L("將 .nsf 檔案拖放到呢度", "Drop an .nsf file here"), Font = Th.Ui(12.5f, FontStyle.Bold), ForeColor = Th.Text, AutoSize = true, BackColor = Th.Surface };
-        var upHint = new Label { Text = L("建議使用郵箱副本 · 本機或者 Domino server 上嘅檔案都得", "Use a copy of the mailbox · local files and Domino server paths both work"), Font = Th.Ui(9.25f), ForeColor = Th.Muted, AutoSize = true, BackColor = Th.Surface };
+        var upText = lblUpText; upText.Font = Th.Ui(12.5f, FontStyle.Bold); upText.ForeColor = Th.Text; upText.AutoSize = true; upText.BackColor = Th.Surface;
+        var upHint = lblUpHint; upHint.Font = Th.Ui(9.25f); upHint.ForeColor = Th.Muted; upHint.AutoSize = true; upHint.BackColor = Th.Surface;
         dropEmpty.Controls.AddRange(new Control[] { upIcon, upText, upHint, btnNsf });
-        dropEmpty.Resize += (_, _) =>
+        layoutDrop = () =>
         {
             int cx = dropEmpty.Width / 2, total = upIcon.Height + upText.Height + upHint.Height + btnNsf.Height + S(16), y = Math.Max(S(8), (dropEmpty.Height - total) / 2);
             upIcon.Location = new Point(cx - upIcon.Width / 2, y); y += upIcon.Height + S(4);
@@ -266,6 +283,7 @@ internal sealed class MainForm : Form
             upHint.Location = new Point(cx - upHint.Width / 2, y); y += upHint.Height + S(10);
             btnNsf.Location = new Point(cx - btnNsf.Width / 2, y);
         };
+        dropEmpty.Resize += (_, _) => layoutDrop();
         dropFile.Dock = DockStyle.Fill; dropFile.BackColor = Th.Surface; dropFile.Visible = false;
         var fileIcon = new IconBadge(Ico.Mail) { Size = new Size(S(52), S(52)), Location = new Point(S(24), S(26)) };
         lblFileName.AutoSize = true; lblFileName.Font = Th.Ui(13f, FontStyle.Bold); lblFileName.ForeColor = Th.Text; lblFileName.BackColor = Th.Surface; lblFileName.Location = new Point(S(90), S(24));
@@ -273,7 +291,7 @@ internal sealed class MainForm : Form
         var change = new LinkLabel { Text = L("更換檔案", "Choose another file"), AutoSize = true, Font = Th.Ui(9.5f), LinkColor = Th.Accent, ActiveLinkColor = Th.AccentDark, LinkBehavior = LinkBehavior.HoverUnderline, BackColor = Th.Surface, Location = new Point(S(91), S(78)) };
         change.LinkClicked += (_, _) => PickNsf();
         dropFile.Controls.AddRange(new Control[] { fileIcon, lblFileName, lblFileMeta, change });
-        var pathBox = Field(txtNsf, L("或者直接貼上 NSF 路徑", "...or paste the NSF path"));
+        var pathBox = Field(txtNsf, "");
         pathBox.Dock = DockStyle.Bottom; pathBox.Margin = new Padding(0); pathBox.Height = S(40); pathBox.Fill = Th.Back; txtNsf.BackColor = Th.Back;
         var pathWrap = new Panel { Dock = DockStyle.Bottom, Height = S(52), Padding = new Padding(S(14), 0, S(14), S(12)), BackColor = Th.Surface };
         pathWrap.Controls.Add(pathBox);
@@ -282,8 +300,9 @@ internal sealed class MainForm : Form
         dropZone.Height = S(232);
         viewSetup.Controls.Add(dropZone);
 
-        viewSetup.Controls.Add(FieldLabel(L("輸出 PST", "Output PST")));
-        viewSetup.Controls.Add(Field(txtPst, L("新 PST 檔案位置（揀咗 NSF 會自動填寫）", "New PST file (filled in when you pick the NSF)"), btnPst));
+        lblOutLabel.Font = Th.Ui(9.5f, FontStyle.Bold); lblOutLabel.ForeColor = Th.Text; lblOutLabel.AutoSize = true; lblOutLabel.Margin = new Padding(0, 0, 0, S(6)); lblOutLabel.BackColor = Th.Back;
+        viewSetup.Controls.Add(lblOutLabel);
+        viewSetup.Controls.Add(Field(txtPst, "", btnPst));
 
         // advanced settings expander
         var advHead = new Card { Radius = 10, Height = S(50), Dock = DockStyle.Top, Margin = new Padding(0, S(2), 0, S(8)), Cursor = Cursors.Hand, Name = "btnAdvanced" };
@@ -298,20 +317,24 @@ internal sealed class MainForm : Form
         viewSetup.Controls.Add(advHead);
 
         var advGrid = Column(); advGrid.BackColor = Th.Surface; advGrid.Dock = DockStyle.Top;
-        void Add(string label, string hint, TextBox box, string placeholder, Control? right = null)
+        // one advanced row = label, field, hint; returns the three controls (rows that only apply to NSF -> PST are hidden in PST -> NSF mode)
+        Control[] Add(string label, string hint, TextBox box, string placeholder, Control? right = null, Label? hintLabel = null)
         {
             var l = FieldLabel(label); l.BackColor = Th.Surface; advGrid.Controls.Add(l);
             var f = Field(box, placeholder, right); f.Fill = Th.Back; box.BackColor = Th.Back; foreach (Control c in f.Controls) if (c is Panel p) p.BackColor = Th.Back;
             f.Margin = new Padding(0, 0, 0, S(2)); advGrid.Controls.Add(f);
-            advGrid.Controls.Add(new Label { Text = hint, Font = Th.Ui(8.75f), ForeColor = Th.Muted, AutoSize = true, BackColor = Th.Surface, Margin = new Padding(S(2), 0, 0, S(12)) });
+            var h = hintLabel ?? new Label();
+            h.Text = hint; h.Font = Th.Ui(8.75f); h.ForeColor = Th.Muted; h.AutoSize = true; h.BackColor = Th.Surface; h.Margin = new Padding(S(2), 0, 0, S(12));
+            advGrid.Controls.Add(h);
+            return new Control[] { l, f, h };
         }
         string opt = L("選填", "Optional");
-        Add("Domino server", L("NSF 喺 server 上先填，留空即係本機檔案。", "Only if the NSF is on a server; leave empty for a local file."), txtServer, L("例如 mail01/ExampleCorp", "e.g. mail01/ExampleCorp"));
-        Add(L("Domino 通訊錄", "Domino directory"), L("用嚟將 Notes 名轉成 email 地址；可以填 server!!names.nsf 或者揀 names.nsf 副本。",
-            "Turns Notes names into email addresses; enter server!!names.nsf or pick a copy of names.nsf."), txtDir, opt, btnDir);
-        Add(L("已讀 / 未讀用戶", "Read / unread user"), L("留空會自動用郵箱主人嘅已讀記錄。", "Leave empty to use the mailbox owner's read marks."), txtUser, L("例如 CN=名/O=機構", "e.g. CN=Name/O=Org"));
-        Add(L("郵箱主人 Notes ID", "Mailbox owner's Notes ID"), L("只有加密郵件先需要；留空用而家登入嘅 ID。", "Only needed for encrypted mail; leave empty to use the current ID."), txtId, opt, btnId);
-        Add(L("ID 密碼", "ID password"), L("只會傳畀轉換程序，唔會寫入記錄。", "Passed only to the converter process, never written to a log."), txtPwd, opt);
+        Add("Domino server", "", txtServer, L("例如 mail01/ExampleCorp", "e.g. mail01/ExampleCorp"), hintLabel: hintServer);
+        nsfOnly.AddRange(Add(L("Domino 通訊錄", "Domino directory"), L("用嚟將 Notes 名轉成 email 地址；可以填 server!!names.nsf 或者揀 names.nsf 副本。",
+            "Turns Notes names into email addresses; enter server!!names.nsf or pick a copy of names.nsf."), txtDir, opt, btnDir));
+        Add(L("已讀 / 未讀用戶", "Read / unread user"), "", txtUser, L("例如 CN=名/O=機構", "e.g. CN=Name/O=Org"), hintLabel: hintUser);
+        nsfOnly.AddRange(Add(L("郵箱主人 Notes ID", "Mailbox owner's Notes ID"), L("只有加密郵件先需要；留空用而家登入嘅 ID。", "Only needed for encrypted mail; leave empty to use the current ID."), txtId, opt, btnId));
+        nsfOnly.AddRange(Add(L("ID 密碼", "ID password"), L("只會傳畀轉換程序，唔會寫入記錄。", "Passed only to the converter process, never written to a log."), txtPwd, opt));
         chkAnon.BackColor = Th.Surface; chkAnon.ForeColor = Th.Text; chkAnon.Font = Th.Ui(9.5f); chkAnon.Margin = new Padding(0, S(2), 0, S(4));
         advGrid.Controls.Add(chkAnon);
         advCard.Radius = 10; advCard.Dock = DockStyle.Top; advCard.AutoSize = true; advCard.AutoSizeMode = AutoSizeMode.GrowAndShrink;
@@ -321,12 +344,42 @@ internal sealed class MainForm : Form
 
         btnStart.Height = S(52); btnStart.Dock = DockStyle.Top; btnStart.Margin = new Padding(0, S(10), 0, S(10)); btnStart.Font = Th.Ui(12f, FontStyle.Bold);
         viewSetup.Controls.Add(btnStart);
-        viewSetup.Controls.Add(new Label
-        {
-            Text = L("轉換期間 Notes 會更新 NSF 入面嘅索引，所以建議用郵箱嘅副本。　Enter = 開始　·　Ctrl+O = 揀檔案",
-                     "Notes updates indexes inside the NSF while converting, so work on a copy.    Enter = start  ·  Ctrl+O = open"),
-            Font = Th.Ui(8.75f), ForeColor = Th.Muted, AutoSize = true, BackColor = Th.Back, Margin = new Padding(0, 0, 0, S(6)),
-        });
+        lblFoot.Font = Th.Ui(8.75f); lblFoot.ForeColor = Th.Muted; lblFoot.AutoSize = true; lblFoot.BackColor = Th.Back; lblFoot.Margin = new Padding(0, 0, 0, S(6));
+        viewSetup.Controls.Add(lblFoot);
+    }
+
+    /// <summary>Puts every direction-dependent text of the window in place (NSF -> PST or PST -> NSF).</summary>
+    void ApplyDirection()
+    {
+        seg.Index = Rev ? 1 : 0;
+        Text = D("Nsf2Pst - Notes 郵箱 (NSF) 轉 Outlook PST", "Nsf2Pst - Notes mailbox (NSF) to Outlook PST",
+                 "Nsf2Pst - Outlook PST 轉 Notes 郵箱 (NSF)", "Nsf2Pst - Outlook PST to Notes mailbox (NSF)");
+        lblSubTitle.Text = D("Notes 郵箱 (NSF) 轉 Outlook PST", "Notes mailbox (NSF) to Outlook PST", "Outlook PST 轉 Notes 郵箱 (NSF)", "Outlook PST to Notes mailbox (NSF)");
+        lblHeading.Text = D("選擇要轉換嘅郵箱", "Choose a mailbox to convert", "選擇要轉換嘅 PST", "Choose a PST to convert");
+        lblSub.Text = D("郵件、資料夾、已讀/未讀、聯絡人、日曆同加密郵件，一次過轉入 Outlook PST。",
+                        "Mail, folders, read/unread state, contacts, calendar and encrypted mail, all into one Outlook PST.",
+                        "郵件、資料夾、已讀/未讀、聯絡人、日曆（包括重複會議）同工作，轉入一個新嘅 Notes 郵箱 (NSF)。",
+                        "Mail, folders, read/unread state, contacts, calendar (including repeating meetings) and tasks, into a new Notes mailbox (NSF).");
+        lblUpText.Text = D("將 .nsf 檔案拖放到呢度", "Drop an .nsf file here", "將 .pst 檔案拖放到呢度", "Drop a .pst file here");
+        lblUpHint.Text = D("建議使用郵箱副本 · 本機或者 Domino server 上嘅檔案都得", "Use a copy of the mailbox · local files and Domino server paths both work",
+                           "建議使用 PST 副本 · 轉換時唔好喺 Outlook 開住佢", "Use a copy of the PST · do not have it open in Outlook while converting");
+        txtNsf.PlaceholderText = D("或者直接貼上 NSF 路徑", "...or paste the NSF path", "或者直接貼上 PST 路徑", "...or paste the PST path");
+        lblOutLabel.Text = D("輸出 PST", "Output PST", "輸出 NSF", "Output NSF");
+        txtPst.PlaceholderText = D("新 PST 檔案位置（揀咗 NSF 會自動填寫）", "New PST file (filled in when you pick the NSF)",
+                                   "新 NSF 檔案位置（揀咗 PST 會自動填寫）", "New NSF file (filled in when you pick the PST)");
+        hintServer.Text = D("NSF 喺 server 上先填，留空即係本機檔案。", "Only if the NSF is on a server; leave empty for a local file.",
+                            "要喺 Domino server 上建立 NSF 先填，留空即係本機檔案。", "Only to create the NSF on a Domino server; leave empty for a local file.");
+        hintUser.Text = D("留空會自動用郵箱主人嘅已讀記錄。", "Leave empty to use the mailbox owner's read marks.",
+                          "未讀標記會寫俾呢個用戶；留空用而家登入嘅 Notes 用戶。", "Unread marks are written for this user; leave empty for the current Notes user.");
+        lblFoot.Text = D("轉換期間 Notes 會更新 NSF 入面嘅索引，所以建議用郵箱嘅副本。　Enter = 開始　·　Ctrl+O = 揀檔案",
+                         "Notes updates indexes inside the NSF while converting, so work on a copy.    Enter = start  ·  Ctrl+O = open",
+                         "新 NSF 用 Notes 郵箱範本（mail12.ntf 等）建立；建議用 PST 副本。　Enter = 開始　·　Ctrl+O = 揀檔案",
+                         "The new NSF is created from the Notes mail template (mail12.ntf ...); work on a copy of the PST.    Enter = start  ·  Ctrl+O = open");
+        btnOpenOut.Text = D("開啟 PST 位置", "Show PST in folder", "開啟 NSF 位置", "Show NSF in folder"); btnOpenOut.Fit();
+        foreach (var c in nsfOnly) c.Visible = !Rev;
+        wordmark?.Invalidate(); stepper.Invalidate();
+        layoutDrop();
+        NsfChanged(); UpdateAdvSummary();
     }
 
     void ToggleAdvanced()
@@ -451,7 +504,7 @@ internal sealed class MainForm : Form
     // =====================================================================================================
     void OnDragEnter(object? s, DragEventArgs e)
     {
-        bool ok = e.Data?.GetData(DataFormats.FileDrop) is string[] f && f.Length > 0 && f[0].EndsWith(".nsf", StringComparison.OrdinalIgnoreCase) && child == null;
+        bool ok = e.Data?.GetData(DataFormats.FileDrop) is string[] f && f.Length > 0 && Path.GetExtension(f[0]).ToLowerInvariant() is ".nsf" or ".pst" && child == null;
         e.Effect = ok ? DragDropEffects.Copy : DragDropEffects.None;
         DropHighlight(ok);
     }
@@ -459,7 +512,11 @@ internal sealed class MainForm : Form
     void OnDragDrop(object? s, DragEventArgs e)
     {
         DropHighlight(false);
-        if (e.Data?.GetData(DataFormats.FileDrop) is string[] f && f.Length > 0) { if (host.Controls.Contains(viewDone)) ShowView(viewSetup); txtPst.Text = ""; txtNsf.Text = f[0]; }
+        if (e.Data?.GetData(DataFormats.FileDrop) is not string[] f || f.Length == 0) return;
+        if (host.Controls.Contains(viewDone)) ShowView(viewSetup);
+        bool pstFile = f[0].EndsWith(".pst", StringComparison.OrdinalIgnoreCase);
+        if (pstFile != Rev) { Rev = pstFile; ApplyDirection(); }   // a .pst dropped in NSF -> PST mode switches the direction
+        txtPst.Text = ""; txtNsf.Text = f[0];
     }
 
     void DropHighlight(bool on)
@@ -477,11 +534,13 @@ internal sealed class MainForm : Form
             var fi = new FileInfo(p);
             lblFileName.Text = fi.Name;
             lblFileMeta.Text = $"{SizeText(fi.Length)}　·　{L("修改於", "modified")} {fi.LastWriteTime:yyyy-MM-dd HH:mm}";
-            if (txtPst.Text.Trim().Length == 0) txtPst.Text = Path.Combine(fi.DirectoryName!, Path.GetFileNameWithoutExtension(fi.Name) + ".pst");
+            if (txtPst.Text.Trim().Length == 0) txtPst.Text = Path.Combine(fi.DirectoryName!, Path.GetFileNameWithoutExtension(fi.Name) + (Rev ? ".nsf" : ".pst"));
             if (envOk) SetStatus(L("準備好，可以開始轉換。", "Ready to convert."));
         }
+        else if (p.Length > 0 && Rev) SetStatus(L("搵唔到呢個 PST 檔案。", "PST file not found."), Tone.Warn);
         else if (p.Length > 0) SetStatus(txtServer.Text.Trim().Length > 0 ? L("會喺 Domino server 開啟呢個郵箱。", "The mailbox will be opened on the Domino server.") : L("搵唔到呢個 NSF 檔案。", "NSF file not found."),
                                          txtServer.Text.Trim().Length > 0 ? Tone.Normal : Tone.Warn);
+        else SetStatus(D("請選擇 NSF 檔案。", "Choose an NSF file.", "請選擇 PST 檔案。", "Choose a PST file."));
         dropEmpty.Visible = !exists; dropFile.Visible = exists;
         dropZone.Dashed = !exists; dropZone.Height = S(exists ? 168 : 232); dropZone.Invalidate();
         btnStart.Enabled = p.Length > 0 && child == null;
@@ -491,9 +550,9 @@ internal sealed class MainForm : Form
     {
         var parts = new List<string>();
         if (txtServer.Text.Trim().Length > 0) parts.Add("Server");
-        if (txtDir.Text.Trim().Length > 0) parts.Add(L("通訊錄", "Directory"));
+        if (!Rev && txtDir.Text.Trim().Length > 0) parts.Add(L("通訊錄", "Directory"));
         if (txtUser.Text.Trim().Length > 0) parts.Add(L("已讀用戶", "Read user"));
-        if (txtId.Text.Trim().Length > 0) parts.Add("Notes ID");
+        if (!Rev && txtId.Text.Trim().Length > 0) parts.Add("Notes ID");
         if (chkAnon.Checked) parts.Add(L("隱藏資料夾名", "Hidden folder names"));
         lblAdvSummary.Text = parts.Count == 0 ? L("全部選填 · 用預設值", "All optional · using defaults") : string.Join(" · ", parts);
         lblAdvSummary.ForeColor = parts.Count == 0 ? Th.Muted : Th.Accent;
@@ -540,7 +599,9 @@ internal sealed class MainForm : Form
 
     void PickNsf()
     {
-        using var d = new OpenFileDialog { Filter = L("Notes 資料庫 (*.nsf)|*.nsf|所有檔案|*.*", "Notes database (*.nsf)|*.nsf|All files|*.*"), Title = L("選擇 NSF（建議用副本）", "Choose an NSF (preferably a copy)") };
+        using var d = Rev
+            ? new OpenFileDialog { Filter = L("Outlook 資料檔 (*.pst)|*.pst|所有檔案|*.*", "Outlook data file (*.pst)|*.pst|All files|*.*"), Title = L("選擇 PST（建議用副本）", "Choose a PST (preferably a copy)") }
+            : new OpenFileDialog { Filter = L("Notes 資料庫 (*.nsf)|*.nsf|所有檔案|*.*", "Notes database (*.nsf)|*.nsf|All files|*.*"), Title = L("選擇 NSF（建議用副本）", "Choose an NSF (preferably a copy)") };
         if (d.ShowDialog(this) != DialogResult.OK) return;
         txtPst.Text = "";
         txtNsf.Text = d.FileName;
@@ -548,7 +609,11 @@ internal sealed class MainForm : Form
 
     void PickPst()
     {
-        using var d = new SaveFileDialog { Filter = L("Outlook 資料檔 (*.pst)|*.pst", "Outlook data file (*.pst)|*.pst"), Title = L("輸出 PST", "Output PST"), OverwritePrompt = false, FileName = Path.GetFileName(txtPst.Text) };
+        using var d = new SaveFileDialog
+        {
+            Filter = Rev ? L("Notes 資料庫 (*.nsf)|*.nsf", "Notes database (*.nsf)|*.nsf") : L("Outlook 資料檔 (*.pst)|*.pst", "Outlook data file (*.pst)|*.pst"),
+            Title = D("輸出 PST", "Output PST", "輸出 NSF", "Output NSF"), OverwritePrompt = false, FileName = Path.GetFileName(txtPst.Text),
+        };
         if (d.ShowDialog(this) == DialogResult.OK) txtPst.Text = d.FileName;
     }
 
@@ -557,27 +622,36 @@ internal sealed class MainForm : Form
     // =====================================================================================================
     async Task RunAsync()
     {
-        string nsf = txtNsf.Text.Trim().Trim('"'), pst = txtPst.Text.Trim().Trim('"'), server = txtServer.Text.Trim(), user = txtUser.Text.Trim(), id = txtId.Text.Trim();
+        // src = the file chosen in the drop zone, dst = the new output file (NSF -> PST: nsf / pst; PST -> NSF: pst / nsf)
+        string src = txtNsf.Text.Trim().Trim('"'), dst = txtPst.Text.Trim().Trim('"'), server = txtServer.Text.Trim(), user = txtUser.Text.Trim(), id = Rev ? "" : txtId.Text.Trim();
+        string dstExt = Rev ? ".nsf" : ".pst";
+        bool dstOnServer = Rev && server.Length > 0;   // PST -> NSF can create the NSF on a Domino server
         if (id.Length > 0 && !File.Exists(id)) { MessageBox.Show(this, L("搵唔到 Notes ID 檔案。", "Notes ID file not found."), Text); return; }
-        if (server.Length == 0 && !File.Exists(nsf)) { MessageBox.Show(this, L("搵唔到 NSF 檔案。", "NSF file not found."), Text); return; }
-        if (nsf.Length == 0 || pst.Length == 0) { MessageBox.Show(this, L("請填寫 NSF 同輸出 PST。", "Enter the NSF and the output PST."), Text); return; }
-        pst = Path.GetFullPath(pst);
-        if (!pst.EndsWith(".pst", StringComparison.OrdinalIgnoreCase)) pst += ".pst";
-        if (File.Exists(pst))
+        if (src.Length == 0 || dst.Length == 0) { MessageBox.Show(this, D("請填寫 NSF 同輸出 PST。", "Enter the NSF and the output PST.", "請填寫 PST 同輸出 NSF。", "Enter the PST and the output NSF."), Text); return; }
+        if ((Rev || server.Length == 0) && !File.Exists(src)) { MessageBox.Show(this, D("搵唔到 NSF 檔案。", "NSF file not found.", "搵唔到 PST 檔案。", "PST file not found."), Text); return; }
+        if (!dstOnServer) dst = Path.GetFullPath(dst);
+        if (!dst.EndsWith(dstExt, StringComparison.OrdinalIgnoreCase)) dst += dstExt;
+        if (!dstOnServer && File.Exists(dst))
         {
-            MessageBox.Show(this, L("輸出 PST 已經存在，請用新檔名（再寫入同一個 PST 會令信件重複）。",
-                                    "The output PST already exists. Use a new file name (writing into the same PST again would duplicate the mail)."), Text);
+            MessageBox.Show(this, D("輸出 PST 已經存在，請用新檔名（再寫入同一個 PST 會令信件重複）。",
+                                    "The output PST already exists. Use a new file name (writing into the same PST again would duplicate the mail).",
+                                    "輸出 NSF 已經存在，請用新檔名（每次都會建立一個新嘅 NSF）。",
+                                    "The output NSF already exists. Use a new file name (a new NSF is always created)."), Text);
             return;
         }
-        txtPst.Text = pst;
-        workDir = Path.Combine(Path.GetDirectoryName(pst)!, Path.GetFileNameWithoutExtension(pst) + "_work");
+        txtPst.Text = dst;
+        string workBase = dstOnServer ? Path.Combine(Path.GetDirectoryName(Path.GetFullPath(src))!, Path.GetFileNameWithoutExtension(dst)) : Path.ChangeExtension(dst, null);
+        workDir = workBase + "_work";
+        // PST -> NSF: the EML files of an earlier run must not mix in, so an existing work folder gets a new name (never deleted)
+        if (Rev && Directory.Exists(workDir)) workDir = workBase + "_work_" + DateTime.Now.ToString("yyyyMMdd_HHmmss");
         Directory.CreateDirectory(workDir);
+        string nsf = Rev ? dst : src, pst = Rev ? src : dst;
 
         SetRunning(true);
         txtLog.Clear();
         foreach (var t in tiles.Values) { t.Text = "–"; t.ForeColor = Th.Text; }
         lblRunTitle.Text = L("轉換中", "Converting");
-        lblRunFile.Text = $"{Path.GetFileName(nsf)}  →  {Path.GetFileName(pst)}";
+        lblRunFile.Text = $"{Path.GetFileName(src)}  →  {Path.GetFileName(dst)}";
         stepper.Current = 0;
         runStart = DateTime.Now; UpdateElapsed(); clock.Start();
         ShowView(viewRun);
@@ -586,7 +660,8 @@ internal sealed class MainForm : Form
         string failText = "";
         try
         {
-            Log(L("開始：", "Start: ") + $"{nsf} → {pst}");
+            Log(L("開始：", "Start: ") + $"{src} → {dst}");
+            if (Rev) { (finished, allOk, stopped, failText) = await RunPstToNsf(src, dst, server, user); return; }
             var exportArgs = new List<string> { "export", nsf, workDir };
             if (server.Length > 0) exportArgs.AddRange(new[] { "--server", server });
             if (user.Length > 0) exportArgs.AddRange(new[] { "--user", user });
@@ -607,18 +682,7 @@ internal sealed class MainForm : Form
             SetStatus(L("第 3 步：核對 ...", "Step 3: verifying ..."));
             var counts = new List<string>();
             await RunChild(new List<string> { "counts", pst }, 950, 1000, counts);
-            var summary = BuildSummary(nsf, pst, counts, (DateTime.Now - runStart).TotalSeconds, chkAnon.Checked, out allOk);
-            File.WriteAllLines(Path.Combine(workDir, "summary.txt"), summary, new UTF8Encoding(true));
-            try { File.WriteAllText(Path.Combine(workDir, "summary.html"), ReportHtml(allOk), new UTF8Encoding(false)); } catch (Exception ex) { Log("summary.html: " + ex.Message); }
-            Log("");
-            foreach (var l in summary) Log(l);
-            UpdateTiles(summary);
-            Log("");
-            Log(L("摘要檔（只有數字，可以對外提供）：", "Summary files (numbers only, safe to share): ") + Path.Combine(workDir, "summary.txt") + " / summary.html");
-            progress.Value = 1000;
-            stepper.Current = 3;
-            if (allOk) SetStatus(L("完成 ✓ 所有 folder 數量核對正確。", "Done ✓ All folder counts match."), Tone.Ok);
-            else SetStatus(L("完成，但有 folder 數量對唔上，請睇摘要。", "Done, but some folder counts do not match - see the summary."), Tone.Warn);
+            allOk = FinishSummary(nsf, pst, counts);
             finished = true;
         }
         catch (Exception ex)
@@ -631,8 +695,61 @@ internal sealed class MainForm : Form
         {
             clock.Stop();
             SetRunning(false);
-            ShowDone(finished, allOk, stopped, failText, pst);
+            ShowDone(finished, allOk, stopped, failText, dst);
         }
+    }
+
+    /// <summary>PST -> NSF: read the PST (Outlook side), write a new NSF (Notes side), set unread marks, verify.</summary>
+    async Task<(bool finished, bool allOk, bool stopped, string failText)> RunPstToNsf(string pst, string nsf, string server, string user)
+    {
+        var srvArgs = server.Length > 0 ? new[] { "--server", server } : Array.Empty<string>();
+        SetStatus(L("第 1 步：由 PST 讀取信件 ...", "Step 1: reading mail from the PST ..."));
+        int rc1 = await RunChild(new List<string> { "pst-export", pst, workDir }, 0, 450);
+        if (stopRequested) { SetStatus(L("已停止。", "Stopped."), Tone.Warn); return (false, false, true, ""); }
+        if (rc1 != 0 && rc1 != 1) { SetStatus(L("讀取 PST 失敗，請睇記錄。", "Reading the PST failed - see the log."), Tone.Bad); return (false, false, false, L("讀取 PST 失敗", "reading the PST failed")); }
+
+        stepper.Current = 1;
+        SetStatus(L("第 2 步：寫入 NSF ...", "Step 2: writing the NSF ..."));
+        var importArgs = new List<string> { "nsf-import", nsf, Path.Combine(workDir, "manifest.jsonl") };
+        importArgs.AddRange(srvArgs);
+        if (user.Length > 0) importArgs.AddRange(new[] { "--user", user });
+        int rc2 = await RunChild(importArgs, 450, 900);
+        if (stopRequested) { SetStatus(L("已停止。", "Stopped."), Tone.Warn); return (false, false, true, ""); }
+        if (rc2 != 0 && rc2 != 1) { SetStatus(L("寫入 NSF 失敗，請睇記錄。", "Writing the NSF failed - see the log."), Tone.Bad); return (false, false, false, L("寫入 NSF 失敗", "writing the NSF failed")); }
+        // unread marks: a separate C-API-only process (see NsfImportTool.MarkUnread)
+        var markArgs = new List<string> { "nsf-mark-unread", nsf, Path.Combine(workDir, "unread_ids.txt") };
+        markArgs.AddRange(srvArgs);
+        int rc3 = await RunChild(markArgs, 900, 950);
+        if (rc3 != 0) Log(L("警告：未讀標記寫入失敗。", "Warning: the unread marks could not be written."));
+
+        stepper.Current = 2;
+        SetStatus(L("第 3 步：核對 ...", "Step 3: verifying ..."));
+        var counts = new List<string>();
+        var countArgs = new List<string> { "nsf-counts", nsf };
+        countArgs.AddRange(srvArgs);
+        if (user.Length > 0) countArgs.AddRange(new[] { "--user", user });
+        await RunChild(countArgs, 950, 1000, counts);
+        bool allOk = FinishSummary(nsf, pst, counts);
+        return (true, allOk, false, "");
+    }
+
+    /// <summary>Writes summary.txt / summary.html, fills the log and the tiles; returns whether every folder matches.</summary>
+    bool FinishSummary(string nsf, string pst, List<string> counts)
+    {
+        // the counts output may contain Notes console messages; only "folder TAB items TAB unread" lines count
+        var summary = BuildSummary(nsf, pst, counts.Where(c => c.Contains('\t')).ToList(), (DateTime.Now - runStart).TotalSeconds, chkAnon.Checked, out bool allOk);
+        File.WriteAllLines(Path.Combine(workDir, "summary.txt"), summary, new UTF8Encoding(true));
+        try { File.WriteAllText(Path.Combine(workDir, "summary.html"), ReportHtml(allOk), new UTF8Encoding(false)); } catch (Exception ex) { Log("summary.html: " + ex.Message); }
+        Log("");
+        foreach (var l in summary) Log(l);
+        UpdateTiles(summary);
+        Log("");
+        Log(L("摘要檔（只有數字，可以對外提供）：", "Summary files (numbers only, safe to share): ") + Path.Combine(workDir, "summary.txt") + " / summary.html");
+        progress.Value = 1000;
+        stepper.Current = 3;
+        if (allOk) SetStatus(L("完成 ✓ 所有 folder 數量核對正確。", "Done ✓ All folder counts match."), Tone.Ok);
+        else SetStatus(L("完成，但有 folder 數量對唔上，請睇摘要。", "Done, but some folder counts do not match - see the summary."), Tone.Warn);
+        return allOk;
     }
 
     void ShowDone(bool finished, bool allOk, bool stopped, string failText, string pst)
@@ -644,8 +761,8 @@ internal sealed class MainForm : Form
             lblDoneIcon.ForeColor = allOk ? Th.Ok : Th.Warn;
             tint = allOk ? Th.OkSoft : Th.WarnSoft;
             lblDoneTitle.Text = allOk ? L("轉換完成", "Conversion complete") : L("轉換完成，但有資料夾數量對唔上", "Converted, but some folder counts do not match");
-            long size = File.Exists(pst) ? new FileInfo(pst).Length : 0;
-            lblDoneSub.Text = $"{L("用時", "Took")} {Elapsed()}　·　PST {SizeText(size)}　·　{Path.GetFileName(pst)}";
+            long size = File.Exists(pst) ? new FileInfo(pst).Length : 0;   // pst = the output file (an NSF in PST -> NSF mode)
+            lblDoneSub.Text = $"{L("用時", "Took")} {Elapsed()}　·　{(Rev ? "NSF" : "PST")} {SizeText(size)}　·　{Path.GetFileName(pst)}";
         }
         else
         {
@@ -658,6 +775,8 @@ internal sealed class MainForm : Form
         hero.Fill = tint; hero.Border = Color.Empty; hero.Invalidate();
         foreach (Control c in hero.Controls) c.BackColor = tint;
 
+        grid.Columns["exp"]!.HeaderText = Rev ? "PST" : "NSF"; grid.Columns["pst"]!.HeaderText = Rev ? "NSF" : "PST";
+        grid.Columns["unread"]!.HeaderText = D("未讀 NSF / PST", "Unread NSF / PST", "未讀 PST / NSF", "Unread PST / NSF");
         grid.Rows.Clear();
         foreach (var r in folderRows)
         {
@@ -790,25 +909,26 @@ internal sealed class MainForm : Form
         string statsFile = Path.Combine(workDir, "address_stats.txt");
         int addrOk = 0, addrBad = 0;
         if (File.Exists(statsFile) && File.ReadAllText(statsFile).Split('\t') is { Length: 3 } ast) { int.TryParse(ast[0], out addrOk); int.TryParse(ast[1], out addrBad); }
-        report = new Stats(log.Count, Count(l => l[3].StartsWith("exported")), Count(l => l[3] == "contact"), Count(l => l[3].StartsWith("appointment")),
+        report = new Stats(log.Count, Count(l => l[3].StartsWith("exported")), Count(l => l[3] == "contact" || l[3].StartsWith("group (")), Count(l => l[3].StartsWith("appointment")),
             Count(l => l[3].Contains("calendar (tentative)")), Count(l => l[3] == "exported (encrypted)"), Count(l => l[3].StartsWith("skipped")), Count(l => l[3].StartsWith("FAILED")),
             Count(l => l[5] == "yes"), seconds, File.Exists(nsf) ? new FileInfo(nsf).Length : 0, new FileInfo(pst).Length, addrOk, addrBad,
             log.Where(l => l[3].StartsWith("FAILED")).GroupBy(l => l[3][8..]).Select(g => (g.Key, g.Count())).OrderByDescending(x => x.Item2).ToList());
         var outp = new List<string>
         {
-            $"NSF -> PST summary  {DateTime.Now:yyyy-MM-dd HH:mm}  (numbers only)",
+            $"{(Rev ? "PST -> NSF" : "NSF -> PST")} summary  {DateTime.Now:yyyy-MM-dd HH:mm}  (numbers only)",
             $"time {seconds:N0}s | NSF size {(File.Exists(nsf) ? new FileInfo(nsf).Length : 0):N0} | PST size {new FileInfo(pst).Length:N0}",
-            $"documents {log.Count} | mails exported {Count(l => l[3].StartsWith("exported"))} | contacts {Count(l => l[3] == "contact")} | calendar entries {Count(l => l[3].StartsWith("appointment"))} | invitations in calendar {Count(l => l[3].Contains("calendar (tentative)"))} | encrypted ok {Count(l => l[3] == "exported (encrypted)")} | skipped (not mail) {Count(l => l[3].StartsWith("skipped"))} | failed {Count(l => l[3].StartsWith("FAILED"))} (encrypted, no key {Count(l => l[3].Contains("encrypted -"))}) | body rebuilt {Count(l => l[4] == "yes")} | unread {Count(l => l[5] == "yes")}",
+            $"documents {log.Count} | mails exported {Count(l => l[3].StartsWith("exported"))} | contacts {Count(l => l[3] == "contact" || l[3].StartsWith("group ("))} | calendar entries {Count(l => l[3].StartsWith("appointment"))} | tasks {Count(l => l[3] == "task")} | groups {Count(l => l[3].StartsWith("group ("))} | invitations in calendar {Count(l => l[3].Contains("calendar (tentative)"))} | encrypted ok {Count(l => l[3] == "exported (encrypted)")} | skipped (not mail) {Count(l => l[3].StartsWith("skipped"))} | failed {Count(l => l[3].StartsWith("FAILED"))} (encrypted, no key {Count(l => l[3].Contains("encrypted -"))}) | body rebuilt {Count(l => l[4] == "yes")} | unread {Count(l => l[5] == "yes")}",
         };
         string stats = Path.Combine(workDir, "address_stats.txt");
         if (File.Exists(stats) && File.ReadAllText(stats).Split('\t') is { Length: 3 } st)
-            outp.Add($"addresses: {st[0]} Notes name(s) -> SMTP | {st[1]} not resolvable ({st[2]} distinct, list in unresolved_names.txt)");
+            outp.Add(Rev ? $"addresses: {st[0]} Exchange address(es) -> SMTP"
+                         : $"addresses: {st[0]} Notes name(s) -> SMTP | {st[1]} not resolvable ({st[2]} distinct, list in unresolved_names.txt)");
         var forms = log.Where(l => l[3].StartsWith("skipped")).GroupBy(l => l[2]).Select(g => $"{(g.Key == "" ? "(none)" : g.Key)}={g.Count()}").ToList();
         if (forms.Count > 0) outp.Add("skipped forms: " + string.Join(", ", forms));
         var fails = log.Where(l => l[3].StartsWith("FAILED")).GroupBy(l => l[3][8..]).Select(g => $"{g.Count()} x {g.Key}").ToList();
         if (fails.Count > 0) outp.Add("failure reasons: " + string.Join(" ; ", fails));
         outp.Add("");
-        outp.Add($"{"folder",-40}{"expected",10}{"in PST",10}{"unread",10}{"unreadPST",10}  check");
+        outp.Add($"{"folder",-40}{"expected",10}{(Rev ? "in NSF" : "in PST"),10}{"unread",10}{(Rev ? "unreadNSF" : "unreadPST"),10}  check");
         int bad = 0, n = 0;
         folderRows = new();
         foreach (var f in expected.Keys.Union(actual.Keys).OrderBy(x => x, StringComparer.Ordinal))
@@ -886,7 +1006,7 @@ internal sealed class MainForm : Form
         string took = Duration(TimeSpan.FromSeconds(s.Seconds));
         h.Append($"<section class=\"hero {(allOk ? "ok" : "warn")}\"><div class=\"mark\">{(allOk ? "&#10003;" : "!")}</div><div>");
         h.Append($"<h1>{E(allOk ? L("所有資料夾數量核對正確", "All folder counts match") : L($"{bad} 個資料夾數量對唔上", $"{bad} folder(s) do not match"))}</h1>");
-        h.Append($"<p>{E(L("用時", "Took"))} {took} · NSF {SizeText(s.NsfSize)} → PST {SizeText(s.PstSize)} · {folderRows.Count} {E(L("個資料夾", "folders"))}</p></div></section>");
+        h.Append($"<p>{E(L("用時", "Took"))} {took} · {(Rev ? $"PST {SizeText(s.PstSize)} → NSF {SizeText(s.NsfSize)}" : $"NSF {SizeText(s.NsfSize)} → PST {SizeText(s.PstSize)}")} · {folderRows.Count} {E(L("個資料夾", "folders"))}</p></div></section>");
 
         void Kpi(string label, int v, bool warnWhenNonZero = false) =>
             h.Append($"<div class=\"card kpi{(warnWhenNonZero && v > 0 ? " bad" : "")}\"><div class=\"l\">{E(label)}</div><div class=\"v\">{v:N0}</div></div>");
@@ -904,7 +1024,7 @@ internal sealed class MainForm : Form
         int total = Math.Max(1, segs.Sum(x => x.v));
         const double R = 54, C = 2 * Math.PI * R;
         var inv = CultureInfo.InvariantCulture;
-        h.Append("<section class=\"grid2\"><div class=\"card\"><h2>").Append(E(L("文件組成", "What was in the NSF"))).Append("</h2><div class=\"donut\">");
+        h.Append("<section class=\"grid2\"><div class=\"card\"><h2>").Append(E(D("文件組成", "What was in the NSF", "PST 內容組成", "What was in the PST"))).Append("</h2><div class=\"donut\">");
         h.Append("<svg viewBox=\"0 0 140 140\" width=\"140\" height=\"140\"><circle cx=\"70\" cy=\"70\" r=\"54\" fill=\"none\" stroke=\"var(--soft)\" stroke-width=\"18\"/>");
         double off = 0;
         foreach (var (_, v, color) in segs.Where(x => x.v > 0))
@@ -924,7 +1044,7 @@ internal sealed class MainForm : Form
         // run facts + address resolution
         h.Append($"<div class=\"card\"><h2>{E(L("轉換資料", "Run details"))}</h2><div class=\"facts\">");
         void Fact(string k, string v) => h.Append($"<span>{E(k)}</span><b>{E(v)}</b>");
-        Fact(L("用時", "Time"), took); Fact(L("NSF 大小", "NSF size"), SizeText(s.NsfSize)); Fact(L("PST 大小", "PST size"), SizeText(s.PstSize));
+        Fact(L("用時", "Time"), took); Fact(L("NSF 大小", "NSF size"), SizeText(s.NsfSize)); Fact(L("PST 大小", "PST size"), SizeText(s.PstSize)); Fact(L("方向", "Direction"), Rev ? "PST → NSF" : "NSF → PST");
         Fact(L("資料夾", "Folders"), folderRows.Count.ToString("N0")); Fact(L("未讀", "Unread"), s.Unread.ToString("N0"));
         Fact(L("加密郵件已解密", "Encrypted mail decrypted"), s.Encrypted.ToString("N0"));
         h.Append("</div>");
@@ -939,7 +1059,7 @@ internal sealed class MainForm : Form
         // folders: NSF (dashed outline) vs PST (filled), unread, check
         int max = Math.Max(1, folderRows.Count == 0 ? 1 : folderRows.Max(r => Math.Max(r.exp, r.pst)));
         h.Append($"<section class=\"card full\"><h2>{E(L("資料夾核對", "Folder check"))}</h2>");
-        h.Append($"<div class=\"row h\"><span>{E(L("資料夾", "Folder"))}</span><span>{E(L("數量（虛線 NSF · 實色 PST）", "Items (dashed NSF, filled PST)"))}</span><span class=\"n\">NSF / PST</span><span class=\"n\">{E(L("未讀", "Unread"))}</span><span></span></div>");
+        h.Append($"<div class=\"row h\"><span>{E(L("資料夾", "Folder"))}</span><span>{E(D("數量（虛線 NSF · 實色 PST）", "Items (dashed NSF, filled PST)", "數量（虛線 PST · 實色 NSF）", "Items (dashed PST, filled NSF)"))}</span><span class=\"n\">{(Rev ? "PST / NSF" : "NSF / PST")}</span><span class=\"n\">{E(L("未讀", "Unread"))}</span><span></span></div>");
         foreach (var r in folderRows)
         {
             string name = r.name == "(default folders)" ? L("預設資料夾（收件匣、寄件備份 …）", "Default folders (Inbox, Sent ...)") : r.name;
@@ -1142,6 +1262,69 @@ internal sealed class MainForm : Form
         }
     }
 
+    /// <summary>Two-option segmented switch (conversion direction). The options are real buttons, so UI Automation can press them.</summary>
+    sealed class Segmented : Panel
+    {
+        readonly Seg[] segs;
+        int index;
+        public event Action? Changed;
+        public int Index { get => index; set { index = value; foreach (var s in segs) s.Invalidate(); } }
+        public Segmented(params string[] items)
+        {
+            DoubleBuffered = true; ResizeRedraw = true; BackColor = Th.Surface;
+            segs = items.Select((t, i) => new Seg(this, i, t) { Name = "segOption" + i }).ToArray();
+            Controls.AddRange(segs);
+            Fit();
+        }
+        /// <summary>Size from the DPI; called again once the window knows its DPI.</summary>
+        public void Fit()
+        {
+            Size = new Size(S(330), S(44)); Padding = new Padding(S(4));
+            int w = (Width - S(8)) / segs.Length;
+            for (int i = 0; i < segs.Length; i++) segs[i].Bounds = new Rectangle(S(4) + i * w, S(4), w, Height - S(8));
+        }
+        void Select(int i) { if (i == index || !Enabled) return; Index = i; Changed?.Invoke(); }
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.Clear(Parent?.BackColor ?? Th.Back);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using var path = Round(new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f), S(12));
+            using (var b = new SolidBrush(Th.Surface)) g.FillPath(b, path);
+            using var pen = new Pen(Th.Line); g.DrawPath(pen, path);
+        }
+
+        sealed class Seg : Button
+        {
+            readonly Segmented owner; readonly int i; bool hover;
+            public Seg(Segmented owner, int i, string text)
+            {
+                this.owner = owner; this.i = i; Text = text;
+                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+                FlatStyle = FlatStyle.Flat; FlatAppearance.BorderSize = 0; Cursor = Cursors.Hand; Font = Th.Ui(10f, FontStyle.Bold);
+            }
+            protected override void OnClick(EventArgs e) { owner.Select(i); base.OnClick(e); }
+            protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+            protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                var g = e.Graphics;
+                g.Clear(Th.Surface);
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                bool on = owner.Index == i;
+                if (on || hover)
+                {
+                    using var path = Round(new RectangleF(0, 0, Width - 1, Height - 1), S(9));
+                    using var b = on ? (Brush)new LinearGradientBrush(new RectangleF(0, 0, Width, Height), Th.Accent2, Th.Accent, LinearGradientMode.Horizontal)
+                                     : new SolidBrush(Th.AccentSoft);
+                    g.FillPath(b, path);
+                }
+                Color fg = on ? Color.White : owner.Enabled ? Th.Text : Th.Muted;
+                TextRenderer.DrawText(g, Text, Font, ClientRectangle, fg, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            }
+        }
+    }
+
     /// <summary>Rounded progress bar, 0-1000.</summary>
     sealed class Bar : Control
     {
@@ -1175,7 +1358,8 @@ internal sealed class MainForm : Form
             var g = e.Graphics;
             g.Clear(Parent?.BackColor ?? Th.Surface);
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            string[] names = { L("匯出郵件", "Export mail"), L("寫入 PST", "Write PST"), L("核對結果", "Verify") };
+            string[] names = Rev ? new[] { L("讀取 PST", "Read PST"), L("寫入 NSF", "Write NSF"), L("核對結果", "Verify") }
+                                 : new[] { L("匯出郵件", "Export mail"), L("寫入 PST", "Write PST"), L("核對結果", "Verify") };
             int n = names.Length, d = S(28), top = S(4);
             float slot = (Width - 1f) / n;
             using var numFont = Th.Ui(10f, FontStyle.Bold);
@@ -1245,7 +1429,7 @@ internal sealed class MainForm : Form
         }
     }
 
-    /// <summary>"Nsf → Pst" word mark: the arrow in the accent colour.</summary>
+    /// <summary>"Nsf → Pst" word mark ("Pst → Nsf" in the other direction): the arrow in the accent colour.</summary>
     sealed class Wordmark : Control
     {
         readonly Font font = Th.Num(15f);
@@ -1264,12 +1448,13 @@ internal sealed class MainForm : Form
         {
             var g = e.Graphics;
             g.Clear(Parent?.BackColor ?? Th.Surface);
-            var a = TextRenderer.MeasureText(g, "Nsf", font, Size.Empty, TextFormatFlags.NoPadding);
+            string first = Rev ? "Pst" : "Nsf", second = Rev ? "Nsf" : "Pst";   // the arrow follows the conversion direction
+            var a = TextRenderer.MeasureText(g, first, font, Size.Empty, TextFormatFlags.NoPadding);
             var b = TextRenderer.MeasureText(g, Ico.Forward, arrow, Size.Empty, TextFormatFlags.NoPadding);
-            TextRenderer.DrawText(g, "Nsf", font, new Point(0, 0), Th.Text, TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, first, font, new Point(0, 0), Th.Text, TextFormatFlags.NoPadding);
             int ax = a.Width + S(6), ay = (a.Height - b.Height) / 2 + S(2);
             TextRenderer.DrawText(g, Ico.Forward, arrow, new Point(ax, ay), Th.Accent, TextFormatFlags.NoPadding);
-            TextRenderer.DrawText(g, "Pst", font, new Point(ax + b.Width + S(7), 0), Th.Text, TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, second, font, new Point(ax + b.Width + S(7), 0), Th.Text, TextFormatFlags.NoPadding);
         }
     }
 

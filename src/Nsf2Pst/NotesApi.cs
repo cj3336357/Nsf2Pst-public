@@ -1,4 +1,4 @@
-// Notes C API calls (nnotes.dll, 64-bit). Handles are 32-bit DHANDLE/DBHANDLE values, NOTEID is a DWORD.
+﻿// Notes C API calls (nnotes.dll, 64-bit). Handles are 32-bit DHANDLE/DBHANDLE values, NOTEID is a DWORD.
 // Strings passed to the C API are LMBCS (translated from UTF-8 with OSTranslate).
 using System.Runtime.InteropServices;
 using System.Text;
@@ -151,5 +151,80 @@ internal static class NotesApi
     public static void ExportEml(string netPath, uint noteId, string file)
     {
         Check(MIMEEMLExport(Lmbcs(netPath), noteId, Lmbcs(file)), "MIMEEMLExport");
+    }
+
+    // ---- PST -> NSF: create mail notes from MIME (the reverse of MIMEEMLExport) -------------------------------------
+    [DllImport(Dll)] static extern void NotesTerm();
+    /// <summary>Shuts the Notes runtime down so that every database is closed cleanly (call last, after all COM objects are released).</summary>
+    public static void Term() { try { NotesTerm(); } catch { } }
+
+    /// <summary>Starts the Notes runtime for a process that uses only the C API (no Notes COM classes).</summary>
+    public static void InitCApi()
+    {
+        string? ini = NotesIni() ?? throw new FileNotFoundException("notes.ini not found");
+        Check(NotesInitExtended(2, new[] { Path.GetDirectoryName(ini)!, "=" + ini }), "NotesInitExtended");
+    }
+    [DllImport(Dll)] static extern ushort NSFNoteCreate(uint hDb, out uint hNote);
+    [DllImport(Dll)] static extern ushort NSFNoteUpdate(uint hNote, ushort flags);
+    [DllImport(Dll)] static extern ushort NSFNoteClose(uint hNote);
+    [DllImport(Dll)] static extern void NSFNoteGetInfo(uint hNote, ushort type, out uint value);
+    [DllImport(Dll)] static extern ushort NSFItemSetText(uint hNote, byte[] name, byte[] text, ushort textLen);
+    [DllImport(Dll)] static extern ushort MIMEStreamOpen(uint hNote, byte[] itemName, ushort itemNameLen, uint openFlags, out IntPtr hStream);
+    [DllImport(Dll)] static extern int MIMEStreamWrite(byte[] data, ushort len, IntPtr hStream);
+    [DllImport(Dll)] static extern ushort MIMEStreamItemize(uint hNote, byte[] itemName, ushort itemNameLen, uint flags, IntPtr hStream);
+    [DllImport(Dll)] static extern void MIMEStreamClose(IntPtr hStream);
+    const uint MIME_STREAM_OPEN_WRITE = 0x2, MIME_STREAM_ITEMIZE_FULL = 0x2 | 0x4;   // ITEMIZE_HEADERS | ITEMIZE_BODY (0x1 = NO_DELIMITER)
+    const ushort NOTE_ID = 1;
+
+    [DllImport(Dll)] static extern ushort CalCreateEntry(uint hDb, byte[] icalendar, uint flags, IntPtr hRetUid, IntPtr ctx);
+
+    /// <summary>Creates a calendar entry (VEVENT) or to do (VTODO) from iCalendar text with the Notes calendar API, the same
+    /// way the Notes client stores it (repeating entries, alarms ...). The text is passed as UTF-8, or LMBCS when lmbcs is set.</summary>
+    public static void CreateCalendarEntry(Db db, string icalendar, bool lmbcs = false)
+    {
+        byte[] data = lmbcs ? Lmbcs(icalendar) : Encoding.UTF8.GetBytes(icalendar + "\0");
+        Check(CalCreateEntry(db.Handle, data, 0, IntPtr.Zero, IntPtr.Zero), "CalCreateEntry");
+    }
+
+    /// <summary>An open database handle for creating notes (C API).</summary>
+    public sealed class Db : IDisposable
+    {
+        public uint Handle { get; private set; }
+        public Db(string netPath) { Check(NSFDbOpen(Lmbcs(netPath), out uint h), "NSFDbOpen"); Handle = h; }
+        public void Dispose() { if (Handle != 0) NSFDbClose(Handle); Handle = 0; }
+    }
+
+    /// <summary>Creates a mail note from an EML file: Notes parses the MIME into native MIME items (Body, From, SendTo,
+    /// Subject, PostedDate ...); Form is set to Memo. Returns the note ID.</summary>
+    public static uint CreateMimeNote(Db db, string emlFile)
+    {
+        Check(NSFNoteCreate(db.Handle, out uint hNote), "NSFNoteCreate");
+        try
+        {
+            byte[] body = Lmbcs("Body");
+            ushort bodyLen = (ushort)(body.Length - 1);
+            Check(MIMEStreamOpen(hNote, body, bodyLen, MIME_STREAM_OPEN_WRITE, out IntPtr stream), "MIMEStreamOpen");
+            try
+            {
+                byte[] all = File.ReadAllBytes(emlFile);
+                const int chunk = 32 * 1024;
+                for (int pos = 0; pos < all.Length; pos += chunk)
+                {
+                    int n = Math.Min(chunk, all.Length - pos);
+                    byte[] part = new byte[n];
+                    Buffer.BlockCopy(all, pos, part, 0, n);
+                    int rc = MIMEStreamWrite(part, (ushort)n, stream);
+                    if (rc != 0) throw new InvalidOperationException($"MIMEStreamWrite: {rc}");
+                }
+                Check(MIMEStreamItemize(hNote, body, bodyLen, MIME_STREAM_ITEMIZE_FULL, stream), "MIMEStreamItemize");
+            }
+            finally { MIMEStreamClose(stream); }
+            byte[] form = Lmbcs("Form"), memo = Lmbcs("Memo");
+            Check(NSFItemSetText(hNote, form, memo, (ushort)(memo.Length - 1)), "NSFItemSetText(Form)");
+            Check(NSFNoteUpdate(hNote, 0), "NSFNoteUpdate");
+            NSFNoteGetInfo(hNote, NOTE_ID, out uint id);
+            return id;
+        }
+        finally { NSFNoteClose(hNote); }
     }
 }

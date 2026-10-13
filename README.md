@@ -2,6 +2,7 @@
 
 Converts HCL Notes / Lotus Notes mail files (`.nsf`) into Outlook data files (`.pst`) on a Windows PC that has both
 a Notes client and Outlook installed. One window, one button: pick the NSF, pick the PST, press **Start**.
+It also converts the other way, **PST → NSF**, into a new Notes mail file (mail, attachments, folders, read / unread).
 
 It was written to fix problems seen with an existing migration tool:
 Traditional Chinese subjects turning into `???`, folders with brackets in their names ending up in "Unfiled",
@@ -86,6 +87,40 @@ Nsf2Pst.exe list   <out.pst>        # folders and items, for checking
 Passwords are read from environment variables, never from the command line:
 `NOTES_PASSWORD` (password of the ID Notes is set up with) and `NOTES_ID_PASSWORD` (password for `--id`).
 
+### PST -> NSF (the other direction)
+
+Switch the window to **PST → NSF** (or drop a `.pst` file on it). A new Notes mail file is created from the Notes mail
+template (`mail12.ntf`, or the newest `mailNN.ntf` in the Notes data folder) and filled from the PST:
+
+| Area | What is converted |
+|---|---|
+| Mail | Every message of the mail folders, with attachments, as native MIME (written by Outlook's own MAPI -> MIME converter, always as UTF-8, and parsed by Notes' MIME API) |
+| Folders | The PST folder tree; Inbox -> `($Inbox)`, Sent Items -> Sent view, Drafts / Outbox -> Drafts, Junk -> `($JunkMail)`, Deleted Items -> folder `Deleted Items`. Mail that NSF -> PST had put into `Unfiled` (mail in no Notes folder) goes back to no folder |
+| Read / unread | Per message, written to the unread table of the mailbox owner (option *Read / unread user*, default: the current Notes user) |
+| Exchange addresses | Mail from Exchange accounts stores sender / recipients as X.500 (`EX`) addresses; the SMTP addresses the PST keeps next to them are used instead |
+| Meeting requests, reports | Messages Outlook's converter refuses (e.g. meeting requests, delivery reports) are rebuilt from their MAPI properties: subject, sender, recipients, date, body, the meeting's time and place, attachments |
+| Contacts | Outlook contacts -> Notes contacts (Person documents): names, e-mail, company, phones, business address, notes. Contact groups -> Notes personal groups (members as Internet addresses) |
+| Calendar | Appointments, all-day and multi-day events, reminders, private entries and repeating appointments (daily / weekly / monthly incl. "2nd Tuesday" and "last day" / yearly patterns, deleted occurrences, no end date), created with the Notes calendar API (`CalCreateEntry`). Attendees are kept as text in the description, so no invitations are sent. Changed single occurrences of a series keep the series' time; a series without an end date is expanded by Notes for about 10 years |
+| Tasks | Outlook tasks -> personal Notes to dos (start, due, completed, progress, importance) |
+| Notes, journal | Sticky notes and journal entries are kept as documents in a folder of the same name |
+| Verification | Items and unread items per folder, PST vs NSF, in `summary.txt` / `summary.html` like the other direction |
+
+```powershell
+Nsf2Pst.exe pst-export      <in.pst> <workdir>                       # EML files + manifest.jsonl (Outlook side)
+Nsf2Pst.exe nsf-import      <new.nsf> <workdir>\manifest.jsonl [--server S] [--user "CN=..."] [--template mail12.ntf]
+Nsf2Pst.exe nsf-mark-unread <new.nsf> <workdir>\unread_ids.txt     # separate step, see below
+Nsf2Pst.exe nsf-counts      <new.nsf>                                # folder <TAB> items <TAB> unread
+```
+
+The unread marks are written by their own process that uses only the Notes C API: a process that uses the Notes COM
+classes cannot shut Notes down cleanly, so an unread table written there would not reach the disk.
+
+`Nsf2Pst.exe pst-make-test <pst>` adds fictional test items that NSF -> PST never creates (a repeating appointment, a
+mail with Exchange addresses, a task, a sticky note, a journal entry), for testing this direction.
+`Nsf2Pst.exe pst-make-uat <pst>` adds a wider fictional set: every supported repeat pattern, a private appointment, a
+multi-day event, a meeting with attendees, completed / undated tasks, a contact group, a meeting request and a delivery
+report.
+
 ## How it works
 
 - **Export** (Notes side): `MIMEEMLExport` from the Notes C API writes each mail as `.eml`; MimeKit then fixes
@@ -106,7 +141,7 @@ Passwords are read from environment variables, never from the command line:
   the converting PC.
 - Meeting attendees are written into the appointment body, not as Outlook meeting attendees.
 - Rebuilt bodies (only for mail Notes converts lossily) are plain text: tables and colours are lost.
-- Not converted: mail rules, signature, out-of-office message, contact groups, to-dos, Notes categories.
+- NSF -> PST does not convert: mail rules, signature, out-of-office message, contact groups, to-dos, Notes categories.
 - No resume / incremental mode: an interrupted run starts again with a new PST.
 - Tested with a handful of real mailboxes up to about 800 MB. Test with your own mailboxes before relying on it.
 

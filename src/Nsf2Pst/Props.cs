@@ -1,4 +1,4 @@
-// Hand marshalling of MAPI property structures (x64 layout).
+﻿// Hand marshalling of MAPI property structures (x64 layout).
 //   SPropValue  = { ULONG ulPropTag; ULONG dwAlignPad; union Value (16 bytes) }   -> 24 bytes, value at +8
 //   SBinary     = { ULONG cb; LPBYTE lpb }                                          -> cb at +8, lpb at +16
 //   SRow        = { ULONG ulAdrEntryPad; ULONG cValues; LPSPropValue lpProps }      -> 16 bytes
@@ -44,6 +44,7 @@ internal static class Props
                 {
                     case Tags.PT_LONG: Marshal.WriteInt32(p, ValueOffset, Convert.ToInt32(value)); break;
                     case Tags.PT_BOOLEAN: Marshal.WriteInt16(p, ValueOffset, (short)((bool)value ? 1 : 0)); break;
+                    case 0x0005: Marshal.WriteInt64(p, ValueOffset, BitConverter.DoubleToInt64Bits(Convert.ToDouble(value))); break;   // PT_DOUBLE
                     case Tags.PT_MV_LONG:
                         int[] ints = (int[])value; IntPtr ip = Alloc(4 * ints.Length); Marshal.Copy(ints, 0, ip, ints.Length);
                         Marshal.WriteInt32(p, ValueOffset, ints.Length); Marshal.WriteIntPtr(p, ValueOffset + 8, ip); break;
@@ -55,6 +56,14 @@ internal static class Props
                         Marshal.WriteIntPtr(p, ValueOffset, a); break;
                     case Tags.PT_SYSTIME:
                         Marshal.WriteInt64(p, ValueOffset, ((DateTimeOffset)value).UtcDateTime.ToFileTimeUtc()); break;
+                    case Tags.PT_MV_BINARY:
+                        byte[][] bins = (byte[][])value; IntPtr arr = Alloc(16 * bins.Length);
+                        for (int k = 0; k < bins.Length; k++)
+                        {
+                            IntPtr data = Alloc(bins[k].Length); Marshal.Copy(bins[k], 0, data, bins[k].Length);
+                            Marshal.WriteInt32(arr, 16 * k, bins[k].Length); Marshal.WriteIntPtr(arr, 16 * k + 8, data);
+                        }
+                        Marshal.WriteInt32(p, ValueOffset, bins.Length); Marshal.WriteIntPtr(p, ValueOffset + 8, arr); break;
                     case Tags.PT_BINARY:
                         byte[] b = (byte[])value; IntPtr bp = Alloc(b.Length); Marshal.Copy(b, 0, bp, b.Length);
                         Marshal.WriteInt32(p, ValueOffset, b.Length); Marshal.WriteIntPtr(p, ValueOffset + 8, bp); break;
@@ -80,6 +89,9 @@ internal static class Props
             Tags.PT_STRING8 => Marshal.PtrToStringAnsi(Marshal.ReadIntPtr(v)),
             Tags.PT_SYSTIME => DateTimeOffset.FromFileTime(Marshal.ReadInt64(v)),
             Tags.PT_BINARY => ReadBinary(v),
+            Tags.PT_MV_BINARY => Enumerable.Range(0, Marshal.ReadInt32(v)).Select(k => ReadBinary(Marshal.ReadIntPtr(v + 8) + 16 * k)).ToArray(),
+            Tags.PT_BOOLEAN => Marshal.ReadInt16(v) != 0,
+            0x0005 => BitConverter.Int64BitsToDouble(Marshal.ReadInt64(v)),   // PT_DOUBLE
             _ => null,   // PT_ERROR and anything we do not use
         };
         return (tag, value);
