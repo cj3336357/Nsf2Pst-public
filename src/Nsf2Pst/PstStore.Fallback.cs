@@ -102,6 +102,64 @@ internal sealed partial class PstStore
         return missing;
     }
 
+    /// <summary>Attached Outlook messages (ATTACH_EMBEDDED_MSG) are written by the converter in the system's ANSI code page
+    /// (GB2312 on a Simplified Chinese system), which loses characters such as 㗎 or 𨋢: PR_INTERNET_CPID set on the outer
+    /// message does not reach them. Each one is converted again on its own as UTF-8 and replaces its message/rfc822 part.
+    /// Returns the number of parts replaced.</summary>
+    int FixEmbeddedMessages(IMessage msg, string eml, int depth = 0)
+    {
+        if (depth > 3 || msg.GetAttachmentTable(MAPI_UNICODE, out IMAPITable at) < 0) return 0;
+        List<Dictionary<uint, object?>> rows;
+        try { rows = QueryAll(at, PR_ATTACH_NUM, PR_ATTACH_METHOD); }
+        finally { Marshal.ReleaseComObject(at); }
+        var embedded = rows.Where(r => r.GetValueOrDefault(PR_ATTACH_METHOD) is uint m && m == 5).Select(r => (uint)r[PR_ATTACH_NUM]!).ToList();
+        if (embedded.Count == 0) return 0;
+
+        MimeMessage outer;
+        using (var ms = new MemoryStream(File.ReadAllBytes(eml))) outer = MimeMessage.Load(ms);
+        var parts = outer.BodyParts.OfType<MessagePart>().Where(p => p.Message != null).ToList();
+        if (parts.Count < embedded.Count) return 0;   // cannot match them reliably: keep what the converter wrote
+        int replaced = 0;
+        IntPtr piid = Marshal.AllocHGlobal(16);
+        try
+        {
+            Marshal.Copy(new Guid("00020307-0000-0000-C000-000000000046").ToByteArray(), 0, piid, 16);   // IID_IMessage
+            for (int i = 0; i < embedded.Count; i++)
+            {
+                string tmp = Path.Combine(Path.GetTempPath(), "nsf2pst_inner_" + Guid.NewGuid().ToString("N") + ".eml");
+                try
+                {
+                    Check(msg.OpenAttach(embedded[i], IntPtr.Zero, MAPI_MODIFY, out IntPtr pa), "OpenAttach");
+                    var att = (IMAPIProp)Marshal.GetObjectForIUnknown(pa); Marshal.Release(pa);
+                    try
+                    {
+                        Check(att.OpenProperty(0x3701000D, piid, 0, MAPI_MODIFY, out IntPtr pm), "OpenProperty(PR_ATTACH_DATA_OBJ)");
+                        var inner = (IMessage)Marshal.GetObjectForIUnknown(pm); Marshal.Release(pm);
+                        try
+                        {
+                            // in memory only: the attachment is never saved
+                            using (var cp = new Block(new List<(uint, object)> { (PR_INTERNET_CPID, 65001) }))
+                            { inner.SetProps(cp.Count, cp.Ptr, out IntPtr prob); if (prob != IntPtr.Zero) Native.MAPIFreeBuffer(prob); }
+                            Check(Native.SHCreateStreamOnFileEx(tmp, STGM_CREATE_WRITE, 0x80, true, IntPtr.Zero, out IStream stm), "create " + tmp);
+                            try { Check(Converter().MAPIToMIMEStm(inner, stm, CCSF_SMTP | CCSF_INCLUDE_BCC), "MAPIToMIMEStm(inner)"); stm.Commit(0); }
+                            finally { Marshal.ReleaseComObject(stm); }
+                            FixEmbeddedMessages(inner, tmp, depth + 1);
+                        }
+                        finally { Marshal.ReleaseComObject(inner); }
+                    }
+                    finally { Marshal.ReleaseComObject(att); }
+                    using (var ms = new MemoryStream(File.ReadAllBytes(tmp))) parts[i].Message = MimeMessage.Load(ms);
+                    replaced++;
+                }
+                catch { /* keep the converter's version of this part */ }
+                finally { try { File.Delete(tmp); } catch { } }
+            }
+        }
+        finally { Marshal.FreeHGlobal(piid); }
+        if (replaced > 0) using (var fs = File.Create(eml)) outer.WriteTo(fs);
+        return replaced;
+    }
+
     /// <summary>Attachments stored by value -> files dir\1.bin, 2.bin ...; returns [{path, name}] (other kinds are counted in skipped).</summary>
     List<Dictionary<string, string>> SaveAttachments(IMessage msg, string dir, out int skipped)
     {

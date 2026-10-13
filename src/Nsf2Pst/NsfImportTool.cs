@@ -96,6 +96,34 @@ internal static class NsfImportTool
         if (db == null) throw new InvalidOperationException("could not create " + nsf);
         db.Title = Opt("--title", Path.GetFileNameWithoutExtension(nsf));
 
+        // PST folders named like a view or folder of the mail template ("Calendar", "Drafts", "Sent" ...) cannot become
+        // Notes folders of that name: PutInFolder would fail or file the mail into the template's hidden folder.
+        // Such folders get " (Outlook)" appended; the renames are written to folder_renames.txt for the verification.
+        var reserved = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Deleted Items" };   // PST -> NSF's own folder
+        foreach (dynamic v in (object[])db.Views)
+        {
+            string vn = ((string)v.Name).Trim('\\');
+            reserved.Add(vn);
+            reserved.Add(vn.TrimStart('(').TrimEnd(')').TrimStart('$'));   // Notes finds "(Drafts)" by "Drafts" as well
+            if (v.Aliases is object[] al) foreach (var a in al) if (a is string s && s.Length > 0) reserved.Add(s);
+        }
+        var renames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        string MapFolder(string path)
+        {
+            int cut = path.IndexOf('\\');
+            string top = cut < 0 ? path : path[..cut], rest = cut < 0 ? "" : path[cut..];
+            if (!reserved.Contains(top)) return path;
+            // subfolders of an English PST's "Deleted Items" stay under the Notes folder for deleted mail
+            if (cut >= 0 && top.Equals("Deleted Items", StringComparison.OrdinalIgnoreCase)) return path;
+            if (!renames.TryGetValue(top, out var renamed))
+            {
+                renamed = top + " (Outlook)";
+                for (int n = 2; reserved.Contains(renamed) || renames.ContainsValue(renamed); n++) renamed = $"{top} (Outlook {n})";
+                renames[top] = renamed;
+            }
+            return renamed + rest;
+        }
+
         // read / unread marks belong to a user name: the mailbox owner, by default the Notes user running this
         string user = Opt("--user", "");
         if (user.Length == 0) user = (string)session.UserName;
@@ -190,7 +218,7 @@ internal static class NsfImportTool
                         else doc.ReplaceItemValue("DeliveredDate", (received ?? posted).LocalDateTime);
                     }
                     doc.Save(true, false);
-                    string? target = NotesFolder.TryGetValue(folder, out var nf) ? nf : folder.StartsWith('@') ? null : folder;
+                    string? target = NotesFolder.TryGetValue(folder, out var nf) ? nf : folder.StartsWith('@') ? null : MapFolder(folder);
                     if (target != null) doc.PutInFolder(target, true);
                     if (!read) unread.Add(id);
                     ok++;
@@ -205,6 +233,8 @@ internal static class NsfImportTool
             }
         }
         // unread marks are written by the next step (nsf-mark-unread, a separate C-API-only process; see there)
+        File.WriteAllLines(Path.Combine(outDir, "folder_renames.txt"), renames.Select(kv => kv.Key + "\t" + kv.Value), new UTF8Encoding(false));
+        foreach (var kv in renames) Console.WriteLine($"folder renamed (a Notes view or folder has that name): {kv.Key} -> {kv.Value}");
         string idFile = Path.Combine(outDir, "unread_ids.txt");
         File.WriteAllLines(idFile, new[] { "user=" + user }.Concat(unread.Select(x => x.ToString("X"))), new UTF8Encoding(false));
         Console.WriteLine($"PROGRESS {lines.Length} {lines.Length}");

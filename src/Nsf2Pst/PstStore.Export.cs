@@ -168,7 +168,11 @@ internal sealed partial class PstStore
                     int missing = WriteMimeFromProps(msg, cls, eml);
                     note = $"from MAPI properties (converter 0x{hr:X8})" + (missing > 0 ? $", {missing} attachment(s) not readable" : "");
                 }
-                else exFixed = FixExchangeAddresses(msg, eml);
+                else
+                {
+                    exFixed = FixExchangeAddresses(msg, eml);
+                    FixEmbeddedMessages(msg, eml);
+                }
 
                 uint flags = r.GetValueOrDefault(Tags.PR_MESSAGE_FLAGS) is uint fl ? fl : 0;
                 var received = r.GetValueOrDefault(Tags.PR_MESSAGE_DELIVERY_TIME) as DateTimeOffset?;

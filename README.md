@@ -95,7 +95,8 @@ template (`mail12.ntf`, or the newest `mailNN.ntf` in the Notes data folder) and
 | Area | What is converted |
 |---|---|
 | Mail | Every message of the mail folders, with attachments, as native MIME (written by Outlook's own MAPI -> MIME converter, always as UTF-8, and parsed by Notes' MIME API) |
-| Folders | The PST folder tree; Inbox -> `($Inbox)`, Sent Items -> Sent view, Drafts / Outbox -> Drafts, Junk -> `($JunkMail)`, Deleted Items -> folder `Deleted Items`. Mail that NSF -> PST had put into `Unfiled` (mail in no Notes folder) goes back to no folder |
+| Folders | The PST folder tree; Inbox -> `($Inbox)`, Sent Items -> Sent view, Drafts / Outbox -> Drafts, Junk -> `($JunkMail)`, Deleted Items -> folder `Deleted Items`. Subfolders of the Inbox and other default folders become Notes folders under the PST folder's name (e.g. `收件匣\專案A`), since Notes' Inbox has no subfolders. A PST folder named like a view or folder of the mail template (`Calendar`, `Drafts`, `Sent`, `Inbox`, `Trash` ...) is renamed to `<name> (Outlook)`. Mail that NSF -> PST had put into `Unfiled` (mail in no Notes folder) goes back to no folder |
+| Attached messages | Outlook messages attached to a mail stay attached messages (`message/rfc822`) with their own attachments, written as UTF-8 so that characters such as 㗎 or 𨋢 survive |
 | Read / unread | Per message, written to the unread table of the mailbox owner (option *Read / unread user*, default: the current Notes user) |
 | Exchange addresses | Mail from Exchange accounts stores sender / recipients as X.500 (`EX`) addresses; the SMTP addresses the PST keeps next to them are used instead |
 | Meeting requests, reports | Messages Outlook's converter refuses (e.g. meeting requests, delivery reports) are rebuilt from their MAPI properties: subject, sender, recipients, date, body, the meeting's time and place, attachments |

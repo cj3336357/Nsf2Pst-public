@@ -441,6 +441,14 @@ internal sealed class MainForm : Form
         lblDoneTitle.AutoSize = true; lblDoneTitle.Font = Th.Ui(16f, FontStyle.Bold); lblDoneTitle.ForeColor = Th.Text; lblDoneTitle.Location = new Point(S(96), S(24));
         lblDoneSub.AutoSize = true; lblDoneSub.Font = Th.Ui(9.75f); lblDoneSub.ForeColor = Th.Muted; lblDoneSub.Location = new Point(S(97), S(60));
         hero.Controls.AddRange(new Control[] { lblDoneIcon, lblDoneTitle, lblDoneSub });
+        // long reasons wrap inside the card, and the card grows with them
+        void FitSub()
+        {
+            lblDoneSub.MaximumSize = new Size(Math.Max(S(200), hero.Width - lblDoneSub.Left - S(24)), 0);
+            hero.Height = Math.Max(S(112), lblDoneSub.Bottom + S(22));
+        }
+        hero.Resize += (_, _) => { if (lblDoneSub.MaximumSize.Width != Math.Max(S(200), hero.Width - lblDoneSub.Left - S(24))) FitSub(); };
+        lblDoneSub.TextChanged += (_, _) => FitSub();
         viewDone.Controls.Add(hero);
 
         var tileRow = new TableLayoutPanel { Dock = DockStyle.Top, Height = S(96), ColumnCount = 5, BackColor = Th.Back, Margin = new Padding(0, 0, 0, S(16)) };
@@ -816,13 +824,15 @@ internal sealed class MainForm : Form
         }
         else
         {
-            lblDoneIcon.Text = stopped ? Ico.Stop : Ico.ErrorBadge;
+            lblDoneIcon.Text = stopped ? Ico.Warning : Ico.ErrorBadge;   // the stop glyph (an empty square) read as an unticked box
             lblDoneIcon.ForeColor = stopped ? Th.Warn : Th.Bad;
             tint = stopped ? Th.WarnSoft : Th.BadSoft;
             lblDoneTitle.Text = stopped ? L("轉換已停止", "Conversion stopped") : L($"轉換未完成：{failText}", $"Conversion not finished: {failText}");
-            lblDoneSub.Text = (!stopped && lastFatal != null ? FriendlyFatal(lastFatal) + "　" : "") + (incomplete != null
-                ? L($"未完成嘅檔案已改名做 {Path.GetFileName(incomplete)}，唔好當完整郵箱使用。", $"The incomplete file was renamed to {Path.GetFileName(incomplete)} - do not use it as a complete mailbox.")
-                : L("撳下面嘅「顯示詳細記錄」睇原因。", "Open \"Show details\" below to see more."));
+            var lines = new List<string>();
+            if (!stopped && lastFatal != null) lines.Add(FriendlyFatal(lastFatal));
+            if (incomplete != null) lines.Add(L($"未完成嘅檔案已改名做 {Path.GetFileName(incomplete)}，唔好當完整郵箱使用。", $"The incomplete file was renamed to {Path.GetFileName(incomplete)} - do not use it as a complete mailbox."));
+            if (lines.Count == 0) lines.Add(L("撳下面嘅「顯示詳細記錄」睇原因。", "Open \"Show details\" below to see why."));
+            lblDoneSub.Text = string.Join("\n", lines);
         }
         hero.Fill = tint; hero.Border = Color.Empty; hero.Invalidate();
         foreach (Control c in hero.Controls) c.BackColor = tint;
@@ -947,12 +957,25 @@ internal sealed class MainForm : Form
             var e = expected.GetValueOrDefault(f);
             expected[f] = (e.total + 1, e.unread + (unread ? 1 : 0));
         }
+        // PST -> NSF renames folders that clash with the mail template ("Calendar" -> "Calendar (Outlook)"): compare by the PST name
+        var renames = new List<(string from, string to)>();
+        string renameFile = Path.Combine(workDir, "folder_renames.txt");
+        if (Rev && File.Exists(renameFile))
+            foreach (var l in File.ReadAllLines(renameFile, Encoding.UTF8)) if (l.Split('\t') is { Length: 2 } p) renames.Add((p[0], p[1]));
+        string Original(string name)
+        {
+            foreach (var (from, to) in renames)
+                if (name.Equals(to, StringComparison.OrdinalIgnoreCase)) return from;
+                else if (name.StartsWith(to + "\\", StringComparison.OrdinalIgnoreCase)) return from + name[to.Length..];
+            return name;
+        }
         var actual = new Dictionary<string, (int total, int unread)>();
         foreach (var row in counts)
         {
             var c = row.Split('\t');
             if (c.Length < 3 || !int.TryParse(c[1], out int t) || !int.TryParse(c[2], out int u)) continue;
-            string f = expected.ContainsKey(c[0]) ? c[0] : "(default folders)";
+            string name = Original(c[0]);
+            string f = expected.ContainsKey(name) ? name : "(default folders)";
             var a = actual.GetValueOrDefault(f);
             actual[f] = (a.total + t, a.unread + u);
         }

@@ -1,4 +1,4 @@
-// UAT helper (Nsf2Pst pst-make-uat <pst>): adds the item types that only exist as MAPI properties, for testing
+﻿// UAT helper (Nsf2Pst pst-make-uat <pst>): adds the item types that only exist as MAPI properties, for testing
 // PST -> NSF: repeating appointments with every supported pattern (daily, monthly nth weekday, yearly, month end
 // without an end date, weekly with deleted occurrences), a private appointment, a multi-day all-day event, a meeting
 // with attendees, completed / undated tasks, a distribution list, a meeting request and a delivery report.
@@ -135,6 +135,71 @@ internal sealed partial class PstStore
             (0x3001001F, "UAT 群組：專案組"), (Named(PSETID_Address, 0x8053, Tags.PT_UNICODE), "UAT 群組：專案組"),
             (Named(PSETID_Address, 0x8054, Tags.PT_MV_BINARY), new[] { OneOff("陳大文", "david.chan@example.com"), OneOff("Mary Wong", "mary.wong@example.com"), OneOff("Ken Lee", "ken.lee@example.net") }),
         });
+
+        // ---- folder structure: subfolders of default folders, and user folders named like Notes system folders
+        DateTimeOffset when0 = At(2024, 5, 10, 9, 0);
+        List<(uint, object)> Mail(string subject) => new()
+        {
+            (Tags.PR_MESSAGE_CLASS_W, "IPM.Note"), (Tags.PR_SUBJECT_W, subject), (PR_BODY_W, "folder test: " + subject),
+            (Tags.PR_MESSAGE_FLAGS, (int)MSGFLAG_READ), (Tags.PR_MESSAGE_DELIVERY_TIME, when0), (Tags.PR_CLIENT_SUBMIT_TIME, when0),
+            (0x0C1E001F, "SMTP"), (0x0C1F001F, "folders@example.com"), (0x0C1A001F, "Folder Test"),
+            (0x0064001F, "SMTP"), (0x0065001F, "folders@example.com"), (0x0042001F, "Folder Test"),
+        };
+        IMAPIFolder Sub(IMAPIFolder parent, string name)
+        {
+            Check(parent.CreateFolder(FOLDER_GENERIC, name, null, IntPtr.Zero, OPEN_IF_EXISTS | MAPI_UNICODE, out IMAPIFolder f), "CreateFolder(" + name + ")");
+            return f;
+        }
+        void Put(IMAPIFolder f, string subject)
+        {
+            Check(f.CreateMessage(IntPtr.Zero, 0, out IMessage m), "CreateMessage");
+            try { using var b = new Block(Mail(subject)); Check(m.SetProps(b.Count, b.Ptr, out IntPtr pr), "SetProps"); if (pr != IntPtr.Zero) Native.MAPIFreeBuffer(pr); Check(m.SaveChanges(0), "SaveChanges"); }
+            finally { Marshal.ReleaseComObject(m); }
+        }
+        IMAPIFolder inboxF = Folder("@Inbox");
+        IMAPIFolder projA = Sub(inboxF, "專案A");
+        Put(projA, "UAT F1 收件匣\\專案A");
+        Put(Sub(projA, "子項 (2024)"), "UAT F2 收件匣\\專案A\\子項");
+        Put(Sub(Folder("@Sent"), "歸檔"), "UAT F3 寄件備份\\歸檔");
+        Put(Sub(Folder("@Deleted"), "舊資料"), "UAT F4 刪除的郵件\\舊資料");
+        foreach (string name in new[] { "Inbox", "Deleted Items", "Drafts", "Sent", "Trash", "Calendar", "Junk", "All Documents", "Follow Up" })
+            Put(Sub(ipmRoot, name), "UAT N " + name);
+
+        // ---- a mail whose attachment is another Outlook message (ATTACH_EMBEDDED_MSG) with its own file attachment
+        Check(inboxF.CreateMessage(IntPtr.Zero, 0, out IMessage outer), "CreateMessage");
+        try
+        {
+            using (var b = new Block(Mail("UAT E1 附件係一封 Outlook 郵件"))) { Check(outer.SetProps(b.Count, b.Ptr, out IntPtr pr), "SetProps"); if (pr != IntPtr.Zero) Native.MAPIFreeBuffer(pr); }
+            Check(outer.CreateAttach(IntPtr.Zero, 0, out _, out IntPtr pa), "CreateAttach");
+            var att = (IMAPIProp)Marshal.GetObjectForIUnknown(pa); Marshal.Release(pa);
+            try
+            {
+                using (var b = new Block(new List<(uint, object)> { (0x37050003, 5), (0x3001001F, "內層郵件：報價"), (0x370B0003, -1) }))   // ATTACH_EMBEDDED_MSG
+                { Check(att.SetProps(b.Count, b.Ptr, out IntPtr pr), "SetProps(attach)"); if (pr != IntPtr.Zero) Native.MAPIFreeBuffer(pr); }
+                IntPtr piid = Marshal.AllocHGlobal(16);
+                try
+                {
+                    Marshal.Copy(new Guid("00020307-0000-0000-C000-000000000046").ToByteArray(), 0, piid, 16);   // IID_IMessage
+                    Check(att.OpenProperty(0x3701000D, piid, 0, 0x2 | 0x1, out IntPtr pm), "OpenProperty(PR_ATTACH_DATA_OBJ)");
+                    var inner = (IMessage)Marshal.GetObjectForIUnknown(pm); Marshal.Release(pm);
+                    try
+                    {
+                        using (var b = new Block(Mail("內層郵件：報價 嘅㗎𨋢")))
+                        { Check(inner.SetProps(b.Count, b.Ptr, out IntPtr pr), "SetProps(inner)"); if (pr != IntPtr.Zero) Native.MAPIFreeBuffer(pr); }
+                        string innerFile = Path.GetTempFileName();
+                        try { File.WriteAllText(innerFile, "內層附件內容 inner attachment", new System.Text.UTF8Encoding(true)); AddAttachment(inner, innerFile, "報價單 嘅㗎𨋢.txt"); }
+                        finally { File.Delete(innerFile); }
+                        Check(inner.SaveChanges(0), "SaveChanges(inner)");
+                    }
+                    finally { Marshal.ReleaseComObject(inner); }
+                }
+                finally { Marshal.FreeHGlobal(piid); }
+                Check(att.SaveChanges(0), "SaveChanges(attach)");
+            }
+            finally { Marshal.ReleaseComObject(att); }
+            Check(outer.SaveChanges(0), "SaveChanges");
+        }
+        finally { Marshal.ReleaseComObject(outer); }
 
         // meeting request and delivery report in the Inbox
         var when = At(2024, 5, 8, 10, 0);
