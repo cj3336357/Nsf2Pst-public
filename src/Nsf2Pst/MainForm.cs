@@ -978,10 +978,12 @@ internal sealed class MainForm : Form
 
     // NSF2PST_TRACE (tests only): timestamps of the run steps, to find where the window waits
     static readonly string? tracePath = Environment.GetEnvironmentVariable("NSF2PST_TRACE");
+    static readonly object traceGate = new();
     static void Trace(string what)
     {
         if (tracePath == null) return;
-        try { File.AppendAllText(tracePath, $"{DateTime.Now:HH:mm:ss.fff} [{Environment.CurrentManagedThreadId}] {what}{Environment.NewLine}"); } catch { }
+        lock (traceGate)   // the taskbar thread and the output readers write too
+            try { File.AppendAllText(tracePath, $"{DateTime.Now:HH:mm:ss.fff} [{Environment.CurrentManagedThreadId}] {what}{Environment.NewLine}"); } catch { }
     }
 
     static void OpenFile(string path) { if (File.Exists(path)) Process.Start(new ProcessStartInfo(path) { UseShellExecute = true }); }
@@ -1716,22 +1718,44 @@ internal sealed class MainForm : Form
         }
         [ComImport, Guid("56FDF344-FD6D-11d0-958A-006097C9A090"), ClassInterface(ClassInterfaceType.None)]
         class TaskbarInstance { }
-        static ITaskbarList3? list;
-        static ITaskbarList3? Get()
-        {
-            if (list != null) return list;
-            try { list = (ITaskbarList3)new TaskbarInstance(); list.HrInit(); } catch { list = null; }
-            return list;
-        }
+        // The calls go to Explorer. They run on a thread of their own, so a busy or hanging Explorer can only delay the
+        // taskbar button, never the window; only the latest value is sent.
+        static readonly object gate = new();
+        static (IntPtr h, int done, int total, int state)? pending;
+        static readonly AutoResetEvent signal = new(false);
+        static Thread? worker;
         public static void Set(IntPtr h, int done, int total, int state = Normal)
         {
-            try
+            lock (gate)
             {
-                var l = Get(); if (l == null) return;
-                if (total <= 0) { l.SetProgressState(h, NoProgress); return; }
-                l.SetProgressState(h, state); l.SetProgressValue(h, (ulong)done, (ulong)total);
+                pending = (h, done, total, state);
+                if (worker == null)
+                {
+                    worker = new Thread(Loop) { IsBackground = true, Name = "taskbar" };
+                    worker.SetApartmentState(ApartmentState.STA);
+                    worker.Start();
+                }
             }
-            catch { }
+            signal.Set();
+        }
+        static void Loop()
+        {
+            ITaskbarList3? list = null;
+            while (true)
+            {
+                signal.WaitOne();
+                (IntPtr h, int done, int total, int state)? next;
+                lock (gate) { next = pending; pending = null; }
+                if (next is not { } v) continue;
+                try
+                {
+                    if (list == null) { list = (ITaskbarList3)new TaskbarInstance(); list.HrInit(); }
+                    if (v.total <= 0) list.SetProgressState(v.h, NoProgress);
+                    else { list.SetProgressState(v.h, v.state); list.SetProgressValue(v.h, (ulong)v.done, (ulong)v.total); }
+                    if (v.total <= 0 || v.done == v.total || v.done == 0) Trace($"taskbar {v.done}/{v.total} state {v.state}");
+                }
+                catch (Exception ex) { list = null; Trace("taskbar failed: " + ex.Message); }   // e.g. Explorer restarted: made again for the next value
+            }
         }
         public static void Clear(IntPtr h) => Set(h, 0, 0);
     }
