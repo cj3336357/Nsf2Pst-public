@@ -43,8 +43,11 @@ Both programs must be licensed on the machine; the tool only calls their APIs an
 ```powershell
 cd src\Nsf2Pst
 dotnet build -c Release
-# single self-contained exe (no .NET install needed on the target PC):
-dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o ..\..\publish
+# single self-contained exe (no .NET install needed on the target PC), about 170 MB. Not compressed on purpose:
+# a compressed single file (-p:EnableCompressionInSingleFile=true, about 70 MB) unpacks itself into memory at every
+# start, and the window starts the exe again for each step - measured with 1000 mails: 113 vs 59 MB for the window,
+# 236 vs 169 MB for the conversion steps, same run time.
+dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ..\..\publish
 ```
 
 ## Usage
