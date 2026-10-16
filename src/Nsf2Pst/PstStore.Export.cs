@@ -37,7 +37,7 @@ internal sealed partial class PstStore
 
     /// <summary>One message written as EML. ExFixed = Exchange addresses replaced by SMTP addresses.</summary>
     public sealed record PstMessage(string Eml, string Target, string Subject, bool Read, DateTimeOffset? Received, DateTimeOffset? Sent,
-                                    bool Draft, string MessageClass, int ExFixed, string? Note = null);
+                                    bool Draft, string MessageClass, int ExFixed, string? Note = null, int Id = 0);
 
     byte[]? InboxEntryId()
     {
@@ -153,15 +153,16 @@ internal sealed partial class PstStore
         Get(t => { int hr = msg.GetProps(t, MAPI_UNICODE, out uint c, out IntPtr p); return (hr, c, p); }, tags.Where(x => (x >> 16) != 0).Distinct().ToArray());
 
     /// <summary>Writes every message of a mail / sticky-note / journal folder as EML into emlDir.</summary>
-    public void ExportFolder(PstFolder f, string emlDir, ref int seq, Action<PstMessage> onMessage, Action<string, string, Exception> onError)
+    /// nextId gives the number of each message (EML file name and log row id), shared with the other item kinds.
+    public void ExportFolder(PstFolder f, string emlDir, Func<int> nextId, Action<PstMessage> onMessage, Action<string, string, Exception> onError)
     {
-        int n = seq;
         ForEachMessage(f, new[] { Tags.PR_SUBJECT_W, Tags.PR_MESSAGE_FLAGS, Tags.PR_MESSAGE_DELIVERY_TIME, Tags.PR_CLIENT_SUBMIT_TIME, Tags.PR_MESSAGE_CLASS_W },
             (r, msg) =>
             {
                 string subject = r.GetValueOrDefault(Tags.PR_SUBJECT_W) as string ?? "";
                 string cls = r.GetValueOrDefault(Tags.PR_MESSAGE_CLASS_W) as string ?? "IPM.Note";
-                string eml = Path.Combine(emlDir, (++n).ToString("D6") + ".eml");
+                int id = nextId();
+                string eml = Path.Combine(emlDir, id.ToString("D6") + ".eml");
                 // UTF-8 for the MIME output: without PR_INTERNET_CPID the converter falls back to the ANSI code page (GB2312 on a
                 // Simplified Chinese system), which loses Traditional Chinese characters. Changed in memory only, never saved.
                 // the message's own code page first: the HTML body (PR_HTML) is stored in it, the fallback below decodes with it
@@ -190,8 +191,11 @@ internal sealed partial class PstStore
                 }
                 else
                 {
-                    exFixed = FixExchangeAddresses(msg, eml);
-                    FixEmbeddedMessages(msg, eml);
+                    // both only improve an EML that is already complete: a problem here must not lose the message
+                    try { exFixed = FixExchangeAddresses(msg, eml); }
+                    catch (Exception ex) { note = "addresses not rewritten: " + ex.Message; }
+                    try { FixEmbeddedMessages(msg, eml); }
+                    catch (Exception ex) { note = (note == null ? "" : note + "; ") + "attached messages not rebuilt: " + ex.Message; }
                 }
 
                 uint flags = r.GetValueOrDefault(Tags.PR_MESSAGE_FLAGS) is uint fl ? fl : 0;
@@ -200,10 +204,9 @@ internal sealed partial class PstStore
                 // only Drafts / Outbox: an unsent message filed in another folder would otherwise show in Notes' Drafts view as well
                 bool draft = f.Kind == "mail" && f.Target is "@Drafts" or "@Outbox";
                 bool read = (flags & MSGFLAG_READ) != 0 || f.Kind != "mail";
-                onMessage(new PstMessage(eml, f.Target is "@Outbox" ? "@Drafts" : f.Target, subject, read, received, sent, draft, cls, exFixed, note));
+                onMessage(new PstMessage(eml, f.Target is "@Outbox" ? "@Drafts" : f.Target, subject, read, received, sent, draft, cls, exFixed, note, id));
             },
             (r, ex) => onError(r.GetValueOrDefault(Tags.PR_MESSAGE_CLASS_W) as string ?? "", r.GetValueOrDefault(Tags.PR_SUBJECT_W) as string ?? "", ex));
-        seq = n;
     }
 
     // ---- Exchange addresses ------------------------------------------------------------------------------------------
@@ -259,7 +262,7 @@ internal sealed partial class PstStore
             }
             list.Clear(); list.AddRange(rebuilt);
         }
-        using (var fs = File.Create(eml)) mime.WriteTo(fs);
+        ReplaceEml(eml, mime);
         return fixedCount;
     }
     /// <summary>A mailbox from a MAPI name and address, or null. The address may come as a whole header value
@@ -340,7 +343,7 @@ internal sealed partial class PstStore
         {
             int start = pos;
             if (unicode) { while (pos + 1 < eid.Length && (eid[pos] != 0 || eid[pos + 1] != 0)) pos += 2; parts.Add(Encoding.Unicode.GetString(eid, start, pos - start)); pos += 2; }
-            else { while (pos < eid.Length && eid[pos] != 0) pos++; parts.Add(Encoding.Default.GetString(eid, start, pos - start)); pos++; }
+            else { while (pos < eid.Length && eid[pos] != 0) pos++; parts.Add(Recurrence.Ansi.GetString(eid, start, pos - start)); pos++; }
         }
         string display = parts.ElementAtOrDefault(0) ?? "", addr = parts.ElementAtOrDefault(2) ?? "";
         if (addr.Length == 0) return display.Length > 0 ? display : null;
@@ -510,6 +513,17 @@ internal static class Recurrence
         catch { return null; }
     }
 
+    /// <summary>
+    /// The Windows ANSI code page (Big5 on a Traditional Chinese system) for the 8-bit strings of older Outlook versions:
+    /// Encoding.Default is UTF-8 on .NET 8 and would turn them into U+FFFD.
+    /// </summary>
+    internal static readonly Encoding Ansi = GetAnsi();
+    static Encoding GetAnsi()
+    {
+        try { Encoding.RegisterProvider(CodePagesEncodingProvider.Instance); return Encoding.GetEncoding(0); }   // 0 = the system ANSI code page (needs the provider)
+        catch { return Encoding.Latin1; }
+    }
+
     /// <summary>ExceptionInfo (and ExtendedException for Unicode subject / location) of the modified occurrences.</summary>
     static List<Modified> ReadExceptions(byte[] b, ref int pos, uint writer2)
     {
@@ -527,15 +541,15 @@ internal static class Recurrence
                 U32();                                       // OriginalStartDate
                 ushort f = U16(); flags.Add(f);
                 string? subject = null, location = null;
-                if ((f & 0x0001) != 0) { U16(); int len = U16(); subject = Encoding.Default.GetString(b, p, len); p += len; }
+                if ((f & 0x0001) != 0) { U16(); int len = U16(); subject = Ansi.GetString(b, p, len); p += len; }
                 if ((f & 0x0002) != 0) U32();                // MeetingType
                 if ((f & 0x0004) != 0) U32();                // ReminderDelta
                 if ((f & 0x0008) != 0) U32();                // ReminderSet
-                if ((f & 0x0010) != 0) { U16(); int len = U16(); location = Encoding.Default.GetString(b, p, len); p += len; }
+                if ((f & 0x0010) != 0) { U16(); int len = U16(); location = Ansi.GetString(b, p, len); p += len; }
                 if ((f & 0x0020) != 0) U32();                // BusyStatus
                 if ((f & 0x0040) != 0) U32();                // Attachment
                 if ((f & 0x0080) != 0) U32();                // SubType
-                if ((f & 0x0200) != 0) U32();                // AppointmentColor
+                if ((f & 0x0100) != 0) U32();                // AppointmentColor (0x0200 = changed body: no field here)
                 list.Add(new Modified(s, e, subject, location));
             }
             p += 4 + (int)BitConverter.ToUInt32(b, p);       // ReservedBlock1

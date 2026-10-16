@@ -89,7 +89,8 @@ internal static class ExportTool
                 uint id = Convert.ToUInt32((string)d.NoteID, 16);
                 if (!noteFolders.TryGetValue(id, out var list)) noteFolders[id] = list = new List<string>();
                 if (!list.Contains(target)) list.Add(target);
-                d = view.GetNextDocument(d);
+                dynamic nd = view.GetNextDocument(d);
+                Release(d); d = nd;
             }
         }
         Console.WriteLine("reading folders ...");
@@ -115,7 +116,7 @@ internal static class ExportTool
         {
             dynamic learnAll = db.AllDocuments;
             dynamic ld = learnAll.GetFirstDocument();
-            while (ld != null) { try { book.Learn(ld); } catch { } ld = learnAll.GetNextDocument(ld); }
+            while (ld != null) { try { book.Learn(ld); } catch { } dynamic nl = learnAll.GetNextDocument(ld); Release(ld); ld = nl; }
         }
 
         // documents Notes itself shows in the calendar: decides which invitations get a tentative appointment
@@ -130,7 +131,8 @@ internal static class ExportTool
                 while (e != null)
                 {
                     if ((bool)e.IsDocument) inCalendar.Add(Convert.ToUInt32((string)e.NoteID, 16));
-                    e = ec.GetNextEntry(e);
+                    dynamic ne = ec.GetNextEntry(e);
+                    Release(e); e = ne;
                 }
             }
         }
@@ -243,6 +245,7 @@ internal static class ExportTool
             }
             done++;
             if (done % 5 == 0 || done == total) { Console.WriteLine($"PROGRESS {done} {total}"); Console.Out.Flush(); }
+            Release(doc);   // Notes keeps every document object in memory until it is released: a large mailbox would grow without limit
             doc = next;
         }
 
@@ -255,6 +258,9 @@ internal static class ExportTool
         if (skippedFolders.Count > 0) Console.WriteLine("skipped system folders: " + string.Join(", ", skippedFolders));
         return failed == 0 ? 0 : 1;
     }
+
+    /// <summary>Releases a Notes COM object right away instead of waiting for the garbage collector.</summary>
+    static void Release(object? o) { try { if (o != null && System.Runtime.InteropServices.Marshal.IsComObject(o)) System.Runtime.InteropServices.Marshal.ReleaseComObject(o); } catch { } }
 
     static object? First(dynamic doc, string item)
     {

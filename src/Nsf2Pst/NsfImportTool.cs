@@ -215,15 +215,18 @@ internal static class NsfImportTool
                         string uid = Guid.NewGuid().ToString("N") + "-nsf2pst";
                         CreateCalendar(cdb, EventICalendar(r, uid));
                         string? longBody = Text(r, "body") is string lb && IsLongBody(lb) ? lb : null;
-                        if (longBody != null) WriteLongBody(session, db, uid, longBody);
-                        appointments++; ok++;
+                        appointments++; ok++;   // the entry exists from here on: later steps only add to it and report their own problems
                         string status = type;
+                        if (longBody != null)
+                            try { WriteLongBody(session, db, uid, longBody); }
+                            catch (Exception ex) { failed++; status += " - long description FAILED: " + ex.Message; Console.WriteLine($"FAILED line {i + 1} (description): {ex.Message}"); }
                         // modified occurrences of a series: their original dates are excluded from the series (EXDATE),
                         // so each one is created as its own entry at its new time, with a changed subject / location
                         if (r.TryGetProperty("modified", out var mods) && mods.ValueKind == JsonValueKind.Array)
                         {
-                            int made = 0;
+                            int made = 0, lost = 0;
                             foreach (var m in mods.EnumerateArray())
+                            try
                             {
                                 var d = new Dictionary<string, object?>();
                                 foreach (var prop in r.EnumerateObject())
@@ -237,7 +240,8 @@ internal static class NsfImportTool
                                 if (longBody != null) WriteLongBody(session, db, uid2, longBody);
                                 made++;
                             }
-                            status += $" (+{made} modified occurrence(s))";
+                            catch (Exception ex) { lost++; failed++; Console.WriteLine($"FAILED line {i + 1} (modified occurrence): {ex.Message}"); }
+                            status += $" (+{made} modified occurrence(s))" + (lost > 0 ? $" - {lost} modified occurrence(s) FAILED" : "");
                         }
                         var atts = PstTool.Attachments(r);
                         if (atts.Count > 0)
@@ -394,9 +398,11 @@ internal static class NsfImportTool
         return sb;
     }
 
-    /// <summary>CalCreateEntry takes no attachments: they are added to the new entry's rich text Body afterwards. The entry
-    /// is found by the iCalendar UID Notes keeps in $ICAL_UID (the main document, not the instance children).</summary>
-    static bool IsLongBody(string body) => Encoding.UTF8.GetByteCount(body) > 30000;
+    /// <summary>
+    /// CalCreateEntry replaces a DESCRIPTION over about 32 KB with a notice: such a body goes into the rich text Body instead.
+    /// Measured after escaping, which doubles every "," ";" and "\".
+    /// </summary>
+    static bool IsLongBody(string body) => Encoding.UTF8.GetByteCount(Esc(body)) > 30000;
 
     /// <summary>The main document of a calendar entry just created with CalCreateEntry (by the UID in $ICAL_UID).</summary>
     static dynamic FindEntry(dynamic session, dynamic db, string uid)
@@ -410,6 +416,9 @@ internal static class NsfImportTool
         return doc ?? throw new InvalidOperationException("calendar entry created, but not found again to complete it");
     }
 
+    /// <summary>Releases a Notes COM object right away instead of waiting for the garbage collector.</summary>
+    static void Release(object? o) { try { if (o != null && System.Runtime.InteropServices.Marshal.IsComObject(o)) System.Runtime.InteropServices.Marshal.ReleaseComObject(o); } catch { } }
+
     /// <summary>Writes a long description (left out of the iCalendar text) into the entry's rich text Body.</summary>
     static void WriteLongBody(dynamic session, dynamic db, string uid, string text)
     {
@@ -421,6 +430,8 @@ internal static class NsfImportTool
         doc.Save(true, false);
     }
 
+    /// <summary>CalCreateEntry takes no attachments: they are added to the new entry's rich text Body afterwards. The entry
+    /// is found by the iCalendar UID Notes keeps in $ICAL_UID (the main document, not the instance children).</summary>
     static void AttachToEntry(dynamic session, dynamic db, string uid, List<(string path, string name)> atts)
     {
         dynamic doc = FindEntry(session, db, uid);
@@ -434,8 +445,10 @@ internal static class NsfImportTool
                 // the attachment takes the file's name: copy it under its real name first
                 string dir = Path.Combine(tmp, Guid.NewGuid().ToString("N")[..8]);
                 Directory.CreateDirectory(dir);
-                string safe = string.Concat(name.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
-                if (safe.Length > 150) safe = safe[..(150 - Path.GetExtension(safe).Length)] + Path.GetExtension(safe);   // file name limit
+                string safe = string.Concat(name.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c)).Trim().TrimEnd('.');
+                if (safe.Length == 0) safe = "attachment" + Path.GetExtension(path);   // no usable name: keep the file's type
+                string ext = Path.GetExtension(safe);
+                if (safe.Length > 150) safe = ext.Length < 50 ? safe[..(150 - ext.Length)] + ext : safe[..150];   // file name limit
                 string named = Path.Combine(dir, safe);
                 File.Copy(path, named);
                 body.EmbedObject(1454, "", named);   // EMBED_ATTACHMENT
@@ -506,7 +519,10 @@ internal static class NsfImportTool
         doc.ReplaceItemValue("TaskType", "1");   // personal to do
         doc.ReplaceItemValue("ExcludeFromView", "D");   // never posted, so without this the Drafts view would show it
         doc.ReplaceItemValue("Subject", Text(r, "subject") ?? "");
-        DateTime? Date(string name) => r.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetDateTimeOffset().LocalDateTime : null;
+        // Outlook keeps a task's start / due date as that date at 00:00 UTC (a date, not a moment): converting it to local
+        // time would move it to the previous day west of UTC, so the UTC date is used as it is
+        DateTime? Date(string name) => r.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String
+            ? DateTime.SpecifyKind(v.GetDateTimeOffset().UtcDateTime.Date, DateTimeKind.Local) : null;
         if (Date("start") is DateTime s) { doc.ReplaceItemValue("StartDateTime", s); doc.ReplaceItemValue("StartDate", s.Date); }
         if (Date("due") is DateTime d) { doc.ReplaceItemValue("DueDateTime", d); doc.ReplaceItemValue("DueDate", d.Date); doc.ReplaceItemValue("CalendarDateTime", d); }
         bool complete = r.TryGetProperty("complete", out var c) && c.GetBoolean();
@@ -562,7 +578,8 @@ internal static class NsfImportTool
                 uint id = Convert.ToUInt32((string)d.NoteID, 16);
                 n++; shown.Add(id);
                 if (unread.Contains(id)) u++;
-                d = view.GetNextDocument(d);
+                dynamic nd = view.GetNextDocument(d);
+                Release(d); d = nd;   // released one by one: Notes keeps every open document in memory
             }
             if (n > 0) Console.WriteLine($"{label}\t{n}\t{u}");
         }
@@ -596,7 +613,8 @@ internal static class NsfImportTool
                 uint id = Convert.ToUInt32((string)doc.NoteID, 16);
                 if (!shown.Contains(id)) { unfiled++; if (unread.Contains(id)) unfiledUnread++; }
             }
-            doc = all.GetNextDocument(doc);
+            dynamic nextDoc = all.GetNextDocument(doc);
+            Release(doc); doc = nextDoc;
         }
         if (contacts + groups > 0) Console.WriteLine($"@Contacts\t{contacts + groups}\t0");
         if (calendar > 0) Console.WriteLine($"@Calendar\t{calendar}\t0");

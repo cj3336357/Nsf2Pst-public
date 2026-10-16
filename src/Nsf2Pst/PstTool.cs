@@ -18,7 +18,8 @@ internal static class PstTool
         string cmd = args[0].ToLowerInvariant(), pst = args[1];
         try
         {
-            if (cmd == "pst-export" && !File.Exists(pst)) { Console.WriteLine("fatal: PST not found: " + pst); return 3; }
+            // only "import" (and the test helpers) may create a PST: opening a missing path would silently make an empty one
+            if (cmd is "pst-export" or "counts" or "list" && !File.Exists(pst)) { Console.WriteLine("fatal: PST not found: " + pst); return 3; }
             if (cmd != "import" && File.Exists(pst) && CheckPst(pst) is string problem) { Console.WriteLine("fatal: " + problem); return 3; }
             // Outlook's PST provider writes into every PST it opens (it refuses read-only files), so PST -> NSF reads a copy:
             // the user's PST stays byte for byte unchanged
@@ -177,7 +178,7 @@ internal static class PstTool
                     break;
                 default:   // mail, sticky notes, journal: EML files
                     if (!f.Target.StartsWith('@')) Line(new() { ["type"] = "folder", ["folder"] = f.Target });   // also empty folders
-                    store.ExportFolder(f, emlDir, ref seq,
+                    store.ExportFolder(f, emlDir, () => ++seq,
                         m =>
                         {
                             Line(new()
@@ -185,7 +186,7 @@ internal static class PstTool
                                 ["eml"] = m.Eml, ["folder"] = m.Target, ["subject"] = m.Subject, ["read"] = m.Read, ["draft"] = m.Draft,
                                 ["received"] = m.Received, ["sent"] = m.Sent, ["class"] = m.MessageClass,
                             });
-                            log.WriteLine(Csv(seq.ToString("X"), "", m.MessageClass, m.Note == null ? "exported" : "exported " + m.Note, "", m.Read ? "" : "yes", m.Target, m.Subject));
+                            log.WriteLine(Csv(m.Id.ToString("X"), "", m.MessageClass, m.Note == null ? "exported" : "exported " + m.Note, "", m.Read ? "" : "yes", m.Target, m.Subject));
                             mails++; exFixed += m.ExFixed; Progress();
                         },
                         (cls, subject, ex) => Fail(cls, subject, ex));

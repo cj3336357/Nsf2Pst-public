@@ -29,13 +29,15 @@ internal sealed class MainForm : Form
     /// <summary>Set when the window closes only to rebuild itself in another language or theme.</summary>
     public bool RestartRequested { get; private set; }
     static (string nsf, string pst, string server, string user, string id, string pwd, string dir, bool anon, bool adv)? carry;
+    static Point? carryBounds;   // window position kept across a rebuild after a DPI change
+    bool dpiMoved;
 
     // ---- controls used by the logic (names = UI Automation ids for the automated tests)
     readonly TextBox txtNsf = new(), txtPst = new(), txtServer = new(), txtUser = new(), txtLog = new(), txtId = new(), txtDir = new(),
                      txtPwd = new() { UseSystemPasswordChar = true };
-    readonly CheckBox chkAnon = new() { Text = L("摘要隱藏資料夾名稱（方便對外提供）", "Hide folder names in the summary (safe to share)"), AutoSize = true };
+    readonly CheckBox chkAnon = new() { Text = L("報告唔顯示資料夾名稱同錯誤詳情（方便交俾其他人）", "Leave folder names and error details out of the report (for sharing)"), AutoSize = true };
     readonly Pill btnStart = new(L("開始轉換", "Start conversion"), primary: true, icon: Ico.Forward, iconAfter: true), btnStop = new(L("停止", "Stop"), icon: Ico.Stop);
-    readonly Pill btnOpenOut = new(L("開啟 PST 位置", "Show PST in folder"), primary: true, icon: Ico.Folder), btnOpenLog = new(L("逐封記錄", "Message log"), icon: Ico.Document);
+    readonly Pill btnOpenOut = new(L("開啟 PST 位置", "Show PST in folder"), primary: true, icon: Ico.Folder), btnOpenLog = new(L("逐項記錄 (CSV)", "Item log (CSV)"), icon: Ico.Document);
     readonly Pill btnSummary = new(L("圖表報告", "Visual report"), icon: Ico.Chart), btnAgain = new(L("轉換另一個郵箱", "Convert another mailbox"), icon: Ico.Refresh);
     readonly Pill btnNsf = new(L("瀏覽檔案", "Browse files"), small: true), btnPst = new(L("更改", "Change"), small: true),
                   btnId = new(L("瀏覽", "Browse"), small: true), btnDir = new(L("瀏覽", "Browse"), small: true);
@@ -53,7 +55,7 @@ internal sealed class MainForm : Form
         : f.Contains("not an Outlook data file") ? L("呢個檔案唔係 Outlook 資料檔（PST）。", "This file is not an Outlook data file (PST).")
         : f.Contains("not a Notes database") ? L("呢個檔案唔係 Notes 資料庫（NSF）。", "This file is not a Notes database (NSF).")
         : f.Contains("cannot open the NSF") ? L("開唔到 NSF：檔案可能已損壞，或者而家個 Notes ID 冇權限。", "The NSF cannot be opened: it may be damaged, or this Notes ID has no access.")
-        : f.Contains("path is too long") ? L("NSF 嘅路徑太長，Notes 開唔到，請用較短嘅 folder 或者檔名。", "The NSF path is too long for Notes. Use a shorter folder or file name.")
+        : f.Contains("path is too long") ? L("NSF 嘅路徑太長，Notes 開唔到，請用較短嘅資料夾或者檔名。", "The NSF path is too long for Notes. Use a shorter folder or file name.")
         : f.Contains("not found") ? L("搵唔到檔案。", "File not found.")
         : f;
 
@@ -78,9 +80,13 @@ internal sealed class MainForm : Form
     readonly Dictionary<string, Label> tiles = new();
     readonly Dictionary<string, Card> tileCards = new();
     readonly DataGridView grid = new();
+    readonly TableLayoutPanel tileRow = new();
+    bool unreadFailed;   // PST -> NSF: the unread marks could not be written
+    readonly List<string> writeFails = new();   // "FAILED line N (...): reason" of the writing step (import / nsf-import)
     readonly Card dropZone = new() { Dashed = true };
     readonly Panel dropEmpty = new(), dropFile = new();
-    readonly Label lblFileName = new(), lblFileMeta = new(), lblEnv = new(), lblEnvWarn = new(), lblAdvSummary = new(), lblAdvChevron = new();
+    readonly Label lblFileName = new(), lblFileMeta = new(), lblEnvWarn = new();
+    readonly Expander advHead = new();
     readonly Card advCard = new();
     readonly Panel logPanel = new();
     readonly LinkLabel btnLog = new();
@@ -99,15 +105,18 @@ internal sealed class MainForm : Form
     public MainForm()
     {
         Text = L("Nsf2Pst - Notes 郵箱 (NSF) 轉 Outlook PST", "Nsf2Pst - Notes mailbox (NSF) to Outlook PST");
-        Font = Th.Ui(10f);
+        Font = Th.Ui(Th.Body);
         AutoScaleMode = AutoScaleMode.None;
-        k = DeviceDpi / 96f;
+        // the scale of the screen the window will open on (after a DPI change: the screen it was moved to)
+        var openAt = carryBounds ?? Cursor.Position;
+        k = Native.MonitorDpi(openAt) / 96f;
         BackColor = Th.Back;
         try { Icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath!); } catch { }
-        var work = Screen.FromPoint(Cursor.Position).WorkingArea;
+        var work = Screen.FromPoint(openAt).WorkingArea;
         MinimumSize = new Size(Math.Min(S(780), work.Width), Math.Min(S(640), work.Height));
         Size = new Size(Math.Min(S(980), work.Width), Math.Min(S(880), work.Height));
         StartPosition = FormStartPosition.CenterScreen;
+        if (carryBounds is { } at) { StartPosition = FormStartPosition.Manual; Location = at; carryBounds = null; }
         AllowDrop = true;
         KeyPreview = true;
 
@@ -119,7 +128,7 @@ internal sealed class MainForm : Form
         ShowView(viewSetup);
 
         // log panel (hidden until asked for)
-        txtLog.Multiline = true; txtLog.ReadOnly = true; txtLog.ScrollBars = ScrollBars.Both; txtLog.WordWrap = false;
+        txtLog.Multiline = true; txtLog.ReadOnly = true; txtLog.ScrollBars = ScrollBars.Vertical; txtLog.WordWrap = true;   // long paths wrap instead of running off the edge
         txtLog.Font = new Font("Consolas", 9.25f); txtLog.Dock = DockStyle.Fill; txtLog.BorderStyle = BorderStyle.None;
         txtLog.BackColor = Th.LogBack; txtLog.ForeColor = Th.LogText;
         logPanel.Dock = DockStyle.Bottom; logPanel.Height = S(210); logPanel.BackColor = Th.LogBack; logPanel.Padding = new Padding(S(16), S(10), S(8), S(8));
@@ -143,17 +152,27 @@ internal sealed class MainForm : Form
         btnOpenOut.Click += (_, _) => { if (File.Exists(txtPst.Text)) Process.Start("explorer.exe", $"/select,\"{txtPst.Text}\""); };
         btnOpenLog.Click += (_, _) => OpenFile(Path.Combine(workDir, "export_log.csv"));
         btnSummary.Click += (_, _) => OpenFile(Path.Combine(workDir, "summary.html"));
-        btnAgain.Click += (_, _) => { txtNsf.Text = ""; txtPst.Text = ""; ShowView(viewSetup); SetStatus(L("請選擇 NSF 檔案。", "Choose an NSF file.")); Taskbar.Set(Handle, 0, 0); };
+        btnAgain.Click += (_, _) => { txtNsf.Text = ""; txtPst.Text = ""; ShowView(viewSetup); NsfChanged(); Taskbar.Set(Handle, 0, 0); };
         btnLang.Click += (_, _) => Rebuild(lang: En ? "zh" : "en");
         btnTheme.Click += (_, _) => Rebuild(theme: Th.Dark ? "light" : "dark");
-        tips.SetToolTip(btnTheme, L("切換深色 / 淺色", "Switch dark / light"));
+        tips.SetToolTip(btnTheme, L("切換深色／淺色", "Switch dark / light"));
+        btnTheme.AccessibleName = L("切換深色／淺色", "Switch dark / light");
+        progress.AccessibleRole = AccessibleRole.ProgressBar; stepper.AccessibleRole = AccessibleRole.StaticText;
+        lblDoneIcon.AccessibleRole = AccessibleRole.Graphic;
         tips.SetToolTip(btnLang, L("Switch to English", "切換到中文"));
         txtNsf.TextChanged += (_, _) => NsfChanged();
         foreach (var t in new Control[] { txtServer, txtDir, txtUser, txtId, txtPwd }) t.TextChanged += (_, _) => UpdateAdvSummary();
         chkAnon.CheckedChanged += (_, _) => UpdateAdvSummary();
         clock.Tick += (_, _) => UpdateElapsed();
         DragEnter += OnDragEnter; DragDrop += OnDragDrop; DragLeave += (_, _) => DropHighlight(false);
-        KeyDown += (_, e) => { if (e.Control && e.KeyCode == Keys.O && child == null) { e.SuppressKeyPress = true; PickNsf(); } };
+        KeyDown += (_, e) =>
+        {
+            if (e.Control && e.KeyCode == Keys.O && child == null) { e.SuppressKeyPress = true; PickNsf(); }
+            else if (e.KeyCode == Keys.Escape && child != null) { e.SuppressKeyPress = true; StopChild(); }   // Esc = Stop
+        };
+        // the window is laid out for one DPI: moved to a screen with another scale it rebuilds itself once the move ends
+        DpiChanged += (_, _) => dpiMoved = true;
+        ResizeEnd += (_, _) => { if (dpiMoved && child == null) { dpiMoved = false; carryBounds = Location; Rebuild(); } };
         AcceptButton = btnStart;
         FormClosing += (_, e) =>
         {
@@ -164,8 +183,8 @@ internal sealed class MainForm : Form
         HandleCreated += (_, _) =>
         {
             Native.StyleTitleBar(Handle, Th.Surface, Th.Line, Th.Dark);
-            Native.DarkScrollbars(txtLog.Handle, true);
-            if (Th.Dark) { Native.DarkScrollbars(host.Handle, true); Native.DarkScrollbars(grid.Handle, true); }
+            Native.DarkScrollbars(txtLog.Handle);
+            if (Th.Dark) { Native.DarkScrollbars(host.Handle); Native.DarkScrollbars(grid.Handle); }
         };
 
         if (carry is { } c)
@@ -199,18 +218,15 @@ internal sealed class MainForm : Form
         var logo = new IconBadge(Ico.Mail, badge: true) { Size = new Size(S(40), S(40)), Location = new Point(S(24), S(14)) };
         var title = wordmark = new Wordmark { Location = new Point(S(76), S(11)), BackColor = Th.Surface };
         var sub = lblSubTitle;
-        sub.Font = Th.Ui(9f); sub.ForeColor = Th.Muted; sub.AutoSize = true; sub.Location = new Point(S(76), S(40)); sub.BackColor = Th.Surface;
-        lblEnv.AutoSize = true; lblEnv.Font = Th.Ui(9f); lblEnv.ForeColor = Th.Muted; lblEnv.BackColor = Th.Surface; lblEnv.Text = L("檢查環境中 ...", "Checking environment ...");
-        bar.Controls.AddRange(new Control[] { logo, title, sub, lblEnv, btnLang, btnTheme });
+        sub.Font = Th.Ui(Th.Small); sub.ForeColor = Th.Muted; sub.AutoSize = true; sub.Location = new Point(S(76), S(40)); sub.BackColor = Th.Surface;
+        // the environment check only shows up when something is missing (banner in the setup view)
+        bar.Controls.AddRange(new Control[] { logo, title, sub, btnLang, btnTheme });
         void Place()
         {
-            int x = bar.Width - S(24) - lblEnv.Width;
-            lblEnv.Location = new Point(x, (bar.Height - lblEnv.Height) / 2);
-            x -= S(20) + btnLang.Width; btnLang.Location = new Point(x, (bar.Height - btnLang.Height) / 2);
+            int x = bar.Width - S(24) - btnLang.Width; btnLang.Location = new Point(x, (bar.Height - btnLang.Height) / 2);
             x -= S(8) + btnTheme.Width; btnTheme.Location = new Point(x, (bar.Height - btnTheme.Height) / 2);
         }
         bar.Resize += (_, _) => Place();
-        lblEnv.SizeChanged += (_, _) => Place();
         return bar;
     }
 
@@ -218,8 +234,8 @@ internal sealed class MainForm : Form
     {
         var bar = new Panel { Dock = DockStyle.Bottom, Height = S(40), BackColor = Th.Surface, Padding = new Padding(S(24), 0, S(24), 0) };
         bar.Paint += (_, e) => { using var p = new Pen(Th.Line); e.Graphics.DrawLine(p, 0, 0, bar.Width, 0); };
-        lblStatus.Font = Th.Ui(9.5f, FontStyle.Bold); lblStatus.BackColor = Th.Surface; lblStatus.ForeColor = Th.Text; lblStatus.Location = new Point(S(24), S(11));
-        btnLog.Text = L("顯示詳細記錄", "Show details"); btnLog.AutoSize = true; btnLog.Font = Th.Ui(9.5f); btnLog.LinkColor = Th.Accent; btnLog.ActiveLinkColor = Th.AccentDark;
+        lblStatus.Font = Th.Ui(Th.Body, FontStyle.Bold); lblStatus.BackColor = Th.Surface; lblStatus.ForeColor = Th.Text; lblStatus.Location = new Point(S(24), S(11));
+        btnLog.Text = L("顯示詳細記錄", "Show details"); btnLog.AutoSize = true; btnLog.Font = Th.Ui(Th.Body); btnLog.LinkColor = Th.Accent; btnLog.ActiveLinkColor = Th.AccentDark;
         btnLog.LinkBehavior = LinkBehavior.HoverUnderline; btnLog.BackColor = Th.Surface;
         btnLog.LinkClicked += (_, _) => ToggleLog();
         bar.Controls.Add(lblStatus); bar.Controls.Add(btnLog);
@@ -242,17 +258,11 @@ internal sealed class MainForm : Form
         return t;
     }
 
-    static Label Heading(string text, float size = 17f) =>
-        new() { Text = text, Font = Th.Ui(size, FontStyle.Bold), ForeColor = Th.Text, AutoSize = true, Margin = new Padding(0, 0, 0, S(2)), BackColor = Th.Back };
-
-    static Label SubText(string text) =>
-        new() { Text = text, Font = Th.Ui(9.75f), ForeColor = Th.Muted, AutoSize = true, Margin = new Padding(0, 0, 0, S(18)), BackColor = Th.Back };
-
     /// <summary>A rounded input with a borderless TextBox (and an optional button on the right).</summary>
     static Card Field(TextBox box, string placeholder, Control? right = null)
     {
-        var c = new Card { Radius = 8, Height = S(44), Dock = DockStyle.Top, Padding = new Padding(S(12), S(11), S(right == null ? 12 : 6), S(6)), Margin = new Padding(0, 0, 0, S(12)) };
-        box.BorderStyle = BorderStyle.None; box.BackColor = Th.Surface; box.ForeColor = Th.Text; box.Font = Th.Ui(10f);
+        var c = new Card { Height = S(44), Dock = DockStyle.Top, Padding = new Padding(S(12), S(11), S(right == null ? 12 : 6), S(6)), Margin = new Padding(0, 0, 0, S(12)) };
+        box.BorderStyle = BorderStyle.None; box.BackColor = Th.Surface; box.ForeColor = Th.Text; box.Font = Th.Ui(Th.Body);
         box.PlaceholderText = placeholder; box.Dock = DockStyle.Fill;
         if (right != null) { right.Dock = DockStyle.Right; c.Controls.Add(right); c.Padding = new Padding(S(12), S(6), S(6), S(6)); var inner = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, S(5), S(8), 0), BackColor = Th.Surface }; inner.Controls.Add(box); c.Controls.Add(inner); inner.BringToFront(); }
         else c.Controls.Add(box);
@@ -260,7 +270,7 @@ internal sealed class MainForm : Form
     }
 
     static Label FieldLabel(string text) =>
-        new() { Text = text, Font = Th.Ui(9.5f, FontStyle.Bold), ForeColor = Th.Text, AutoSize = true, Margin = new Padding(0, 0, 0, S(6)), BackColor = Th.Back };
+        new() { Text = text, Font = Th.Ui(Th.Body, FontStyle.Bold), ForeColor = Th.Text, AutoSize = true, Margin = new Padding(0, 0, 0, S(6)), BackColor = Th.Back };
 
     void BuildSetup()
     {
@@ -268,13 +278,13 @@ internal sealed class MainForm : Form
         seg.Margin = new Padding(0, 0, 0, S(18));
         seg.Changed += () => { if (child == null) { Rev = seg.Index == 1; txtNsf.Text = ""; txtPst.Text = ""; ApplyDirection(); } };
         viewSetup.Controls.Add(seg);
-        lblHeading.Font = Th.Ui(17f, FontStyle.Bold); lblHeading.ForeColor = Th.Text; lblHeading.AutoSize = true; lblHeading.Margin = new Padding(0, 0, 0, S(2)); lblHeading.BackColor = Th.Back;
-        lblSub.Font = Th.Ui(9.75f); lblSub.ForeColor = Th.Muted; lblSub.AutoSize = true; lblSub.Margin = new Padding(0, 0, 0, S(18)); lblSub.BackColor = Th.Back;
+        lblHeading.Font = Th.Ui(Th.Heading, FontStyle.Bold); lblHeading.ForeColor = Th.Text; lblHeading.AutoSize = true; lblHeading.Margin = new Padding(0, 0, 0, S(2)); lblHeading.BackColor = Th.Back;
+        lblSub.Font = Th.Ui(Th.Body); lblSub.ForeColor = Th.Muted; lblSub.AutoSize = true; lblSub.Margin = new Padding(0, 0, 0, S(18)); lblSub.BackColor = Th.Back;
         viewSetup.Controls.Add(lblHeading);
         viewSetup.Controls.Add(lblSub);
 
         lblEnvWarn.AutoSize = false; lblEnvWarn.Dock = DockStyle.Top; lblEnvWarn.Height = S(40); lblEnvWarn.Visible = false;
-        lblEnvWarn.BackColor = Th.BadSoft; lblEnvWarn.ForeColor = Th.Bad; lblEnvWarn.Font = Th.Ui(9.5f, FontStyle.Bold);
+        lblEnvWarn.BackColor = Th.BadSoft; lblEnvWarn.ForeColor = Th.Bad; lblEnvWarn.Font = Th.Ui(Th.Body, FontStyle.Bold);
         lblEnvWarn.TextAlign = ContentAlignment.MiddleLeft; lblEnvWarn.Padding = new Padding(S(14), 0, 0, 0); lblEnvWarn.Margin = new Padding(0, 0, 0, S(14));
         viewSetup.Controls.Add(lblEnvWarn);
 
@@ -283,8 +293,8 @@ internal sealed class MainForm : Form
         dropZone.DragEnter += OnDragEnter; dropZone.DragDrop += OnDragDrop; dropZone.DragLeave += (_, _) => DropHighlight(false);
         dropEmpty.Dock = DockStyle.Fill; dropEmpty.BackColor = Th.Surface;
         var upIcon = new Label { Text = Ico.Upload, Font = Ico.Font(26f), ForeColor = Th.Accent, AutoSize = true, BackColor = Th.Surface };
-        var upText = lblUpText; upText.Font = Th.Ui(12.5f, FontStyle.Bold); upText.ForeColor = Th.Text; upText.AutoSize = true; upText.BackColor = Th.Surface;
-        var upHint = lblUpHint; upHint.Font = Th.Ui(9.25f); upHint.ForeColor = Th.Muted; upHint.AutoSize = true; upHint.BackColor = Th.Surface;
+        var upText = lblUpText; upText.Font = Th.Ui(Th.Title, FontStyle.Bold); upText.ForeColor = Th.Text; upText.AutoSize = true; upText.BackColor = Th.Surface;
+        var upHint = lblUpHint; upHint.Font = Th.Ui(Th.Body); upHint.ForeColor = Th.Muted; upHint.AutoSize = true; upHint.BackColor = Th.Surface;
         dropEmpty.Controls.AddRange(new Control[] { upIcon, upText, upHint, btnNsf });
         layoutDrop = () =>
         {
@@ -297,9 +307,9 @@ internal sealed class MainForm : Form
         dropEmpty.Resize += (_, _) => layoutDrop();
         dropFile.Dock = DockStyle.Fill; dropFile.BackColor = Th.Surface; dropFile.Visible = false;
         var fileIcon = new IconBadge(Ico.Mail) { Size = new Size(S(52), S(52)), Location = new Point(S(24), S(26)) };
-        lblFileName.AutoSize = true; lblFileName.Font = Th.Ui(13f, FontStyle.Bold); lblFileName.ForeColor = Th.Text; lblFileName.BackColor = Th.Surface; lblFileName.Location = new Point(S(90), S(24));
-        lblFileMeta.AutoSize = true; lblFileMeta.Font = Th.Ui(9.25f); lblFileMeta.ForeColor = Th.Muted; lblFileMeta.BackColor = Th.Surface; lblFileMeta.Location = new Point(S(91), S(54));
-        var change = new LinkLabel { Text = L("更換檔案", "Choose another file"), AutoSize = true, Font = Th.Ui(9.5f), LinkColor = Th.Accent, ActiveLinkColor = Th.AccentDark, LinkBehavior = LinkBehavior.HoverUnderline, BackColor = Th.Surface, Location = new Point(S(91), S(78)) };
+        lblFileName.AutoSize = true; lblFileName.Font = Th.Ui(Th.Title, FontStyle.Bold); lblFileName.ForeColor = Th.Text; lblFileName.BackColor = Th.Surface; lblFileName.Location = new Point(S(90), S(24));
+        lblFileMeta.AutoSize = true; lblFileMeta.Font = Th.Ui(Th.Body); lblFileMeta.ForeColor = Th.Muted; lblFileMeta.BackColor = Th.Surface; lblFileMeta.Location = new Point(S(91), S(54));
+        var change = new LinkLabel { Text = L("更換檔案", "Choose another file"), AutoSize = true, Font = Th.Ui(Th.Body), LinkColor = Th.Accent, ActiveLinkColor = Th.AccentDark, LinkBehavior = LinkBehavior.HoverUnderline, BackColor = Th.Surface, Location = new Point(S(91), S(78)) };
         change.LinkClicked += (_, _) => PickNsf();
         dropFile.Controls.AddRange(new Control[] { fileIcon, lblFileName, lblFileMeta, change });
         var pathBox = Field(txtNsf, "");
@@ -311,20 +321,14 @@ internal sealed class MainForm : Form
         dropZone.Height = S(232);
         viewSetup.Controls.Add(dropZone);
 
-        lblOutLabel.Font = Th.Ui(9.5f, FontStyle.Bold); lblOutLabel.ForeColor = Th.Text; lblOutLabel.AutoSize = true; lblOutLabel.Margin = new Padding(0, 0, 0, S(6)); lblOutLabel.BackColor = Th.Back;
+        lblOutLabel.Font = Th.Ui(Th.Body, FontStyle.Bold); lblOutLabel.ForeColor = Th.Text; lblOutLabel.AutoSize = true; lblOutLabel.Margin = new Padding(0, 0, 0, S(6)); lblOutLabel.BackColor = Th.Back;
         viewSetup.Controls.Add(lblOutLabel);
         viewSetup.Controls.Add(Field(txtPst, "", btnPst));
 
         // advanced settings expander
-        var advHead = new Card { Radius = 10, Height = S(50), Dock = DockStyle.Top, Margin = new Padding(0, S(2), 0, S(8)), Cursor = Cursors.Hand, Name = "btnAdvanced" };
-        var gear = new Label { Text = Ico.Settings, Font = Ico.Font(13f), ForeColor = Th.Muted, AutoSize = true, BackColor = Th.Surface, Location = new Point(S(16), S(15)) };
-        var advTitle = new Label { Text = L("進階設定", "Advanced settings"), Font = Th.Ui(10.5f, FontStyle.Bold), ForeColor = Th.Text, AutoSize = true, BackColor = Th.Surface, Location = new Point(S(46), S(14)) };
-        lblAdvSummary.AutoSize = true; lblAdvSummary.Font = Th.Ui(9.25f); lblAdvSummary.ForeColor = Th.Muted; lblAdvSummary.BackColor = Th.Surface;
-        lblAdvChevron.Text = Ico.ChevronDown; lblAdvChevron.Font = Ico.Font(10f); lblAdvChevron.ForeColor = Th.Muted; lblAdvChevron.AutoSize = true; lblAdvChevron.BackColor = Th.Surface;
-        advHead.Controls.AddRange(new Control[] { gear, advTitle, lblAdvSummary, lblAdvChevron });
-        advHead.Resize += (_, _) => { lblAdvChevron.Location = new Point(advHead.Width - S(34), S(17)); lblAdvSummary.Location = new Point(advHead.Width - S(46) - lblAdvSummary.Width, S(16)); };
-        lblAdvSummary.SizeChanged += (_, _) => lblAdvSummary.Location = new Point(advHead.Width - S(46) - lblAdvSummary.Width, S(16));
-        foreach (Control c in new Control[] { advHead, gear, advTitle, lblAdvSummary, lblAdvChevron }) { c.Click += (_, _) => ToggleAdvanced(); c.Cursor = Cursors.Hand; }
+        advHead.Name = "btnAdvanced"; advHead.Text = L("進階設定", "Advanced settings");
+        advHead.Height = S(50); advHead.Dock = DockStyle.Top; advHead.Margin = new Padding(0, S(2), 0, S(8));
+        advHead.Click += (_, _) => ToggleAdvanced();
         viewSetup.Controls.Add(advHead);
 
         var advGrid = Column(); advGrid.BackColor = Th.Surface; advGrid.Dock = DockStyle.Top;
@@ -335,27 +339,27 @@ internal sealed class MainForm : Form
             var f = Field(box, placeholder, right); f.Fill = Th.Back; box.BackColor = Th.Back; foreach (Control c in f.Controls) if (c is Panel p) p.BackColor = Th.Back;
             f.Margin = new Padding(0, 0, 0, S(2)); advGrid.Controls.Add(f);
             var h = hintLabel ?? new Label();
-            h.Text = hint; h.Font = Th.Ui(8.75f); h.ForeColor = Th.Muted; h.AutoSize = true; h.BackColor = Th.Surface; h.Margin = new Padding(S(2), 0, 0, S(12));
+            h.Text = hint; h.Font = Th.Ui(Th.Small); h.ForeColor = Th.Muted; h.AutoSize = true; h.BackColor = Th.Surface; h.Margin = new Padding(S(2), 0, 0, S(12));
             advGrid.Controls.Add(h);
             return new Control[] { l, f, h };
         }
         string opt = L("選填", "Optional");
-        Add("Domino server", "", txtServer, L("例如 mail01/ExampleCorp", "e.g. mail01/ExampleCorp"), hintLabel: hintServer);
-        nsfOnly.AddRange(Add(L("Domino 通訊錄", "Domino directory"), L("用嚟將 Notes 名轉成 email 地址；可以填 server!!names.nsf 或者揀 names.nsf 副本。",
-            "Turns Notes names into email addresses; enter server!!names.nsf or pick a copy of names.nsf."), txtDir, opt, btnDir));
-        Add(L("已讀 / 未讀用戶", "Read / unread user"), "", txtUser, L("例如 CN=名/O=機構", "e.g. CN=Name/O=Org"), hintLabel: hintUser);
+        Add(L("郵件伺服器（Domino）", "Mail server (Domino)"), "", txtServer, L("例如 mail01/ExampleCorp", "e.g. mail01/ExampleCorp"), hintLabel: hintServer);
+        nsfOnly.AddRange(Add(L("公司通訊錄（names.nsf）", "Company directory (names.nsf)"), L("用嚟將 Notes 名轉做電郵地址。揀一個 names.nsf 副本，或者填「伺服器名稱!!names.nsf」。",
+            "Turns Notes names into email addresses. Pick a copy of names.nsf, or enter \"server name!!names.nsf\"."), txtDir, opt, btnDir));
+        Add(L("用邊個人嘅已讀記錄", "Whose read marks to use"), "", txtUser, L("Notes 全名，例如 陳大文/IT/ExampleCorp", "Full Notes name, e.g. John Smith/IT/ExampleCorp"), hintLabel: hintUser);
         nsfOnly.AddRange(Add(L("郵箱主人 Notes ID", "Mailbox owner's Notes ID"), L("只有加密郵件先需要；留空用而家登入嘅 ID。", "Only needed for encrypted mail; leave empty to use the current ID."), txtId, opt, btnId));
         nsfOnly.AddRange(Add(L("ID 密碼", "ID password"), L("只會傳畀轉換程序，唔會寫入記錄。", "Passed only to the converter process, never written to a log."), txtPwd, opt));
-        chkAnon.BackColor = Th.Surface; chkAnon.ForeColor = Th.Text; chkAnon.Font = Th.Ui(9.5f); chkAnon.Margin = new Padding(0, S(2), 0, S(4));
+        chkAnon.BackColor = Th.Surface; chkAnon.ForeColor = Th.Text; chkAnon.Font = Th.Ui(Th.Body); chkAnon.Margin = new Padding(0, S(2), 0, S(4));
         advGrid.Controls.Add(chkAnon);
-        advCard.Radius = 10; advCard.Dock = DockStyle.Top; advCard.AutoSize = true; advCard.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        advCard.Dock = DockStyle.Top; advCard.AutoSize = true; advCard.AutoSizeMode = AutoSizeMode.GrowAndShrink;
         advCard.Padding = new Padding(S(20), S(16), S(20), S(12)); advCard.Margin = new Padding(0, 0, 0, S(14)); advCard.Visible = false;
         advCard.Controls.Add(advGrid);
         viewSetup.Controls.Add(advCard);
 
-        btnStart.Height = S(52); btnStart.Dock = DockStyle.Top; btnStart.Margin = new Padding(0, S(10), 0, S(10)); btnStart.Font = Th.Ui(12f, FontStyle.Bold);
+        btnStart.Height = S(52); btnStart.Dock = DockStyle.Top; btnStart.Margin = new Padding(0, S(10), 0, S(10)); btnStart.Font = Th.Ui(Th.Title, FontStyle.Bold);
         viewSetup.Controls.Add(btnStart);
-        lblFoot.Font = Th.Ui(8.75f); lblFoot.ForeColor = Th.Muted; lblFoot.AutoSize = true; lblFoot.BackColor = Th.Back; lblFoot.Margin = new Padding(0, 0, 0, S(6));
+        lblFoot.Font = Th.Ui(Th.Small); lblFoot.ForeColor = Th.Muted; lblFoot.AutoSize = true; lblFoot.BackColor = Th.Back; lblFoot.Margin = new Padding(0, 0, 0, S(6));
         viewSetup.Controls.Add(lblFoot);
     }
 
@@ -367,25 +371,25 @@ internal sealed class MainForm : Form
                  "Nsf2Pst - Outlook PST 轉 Notes 郵箱 (NSF)", "Nsf2Pst - Outlook PST to Notes mailbox (NSF)");
         lblSubTitle.Text = D("Notes 郵箱 (NSF) 轉 Outlook PST", "Notes mailbox (NSF) to Outlook PST", "Outlook PST 轉 Notes 郵箱 (NSF)", "Outlook PST to Notes mailbox (NSF)");
         lblHeading.Text = D("選擇要轉換嘅郵箱", "Choose a mailbox to convert", "選擇要轉換嘅 PST", "Choose a PST to convert");
-        lblSub.Text = D("郵件、資料夾、已讀/未讀、聯絡人、日曆同加密郵件，一次過轉入 Outlook PST。",
-                        "Mail, folders, read/unread state, contacts, calendar and encrypted mail, all into one Outlook PST.",
-                        "郵件、資料夾、已讀/未讀、聯絡人、日曆（包括重複會議）同工作，轉入一個新嘅 Notes 郵箱 (NSF)。",
+        lblSub.Text = D("郵件、資料夾、已讀／未讀、聯絡人同日曆轉入一個 Outlook PST；加密郵件需要郵箱主人嘅 Notes ID。",
+                        "Mail, folders, read/unread state, contacts and calendar into one Outlook PST; encrypted mail needs the owner's Notes ID.",
+                        "郵件、資料夾、已讀／未讀、聯絡人、日曆（包括重複會議）同工作，轉入一個新嘅 Notes 郵箱 (NSF)。",
                         "Mail, folders, read/unread state, contacts, calendar (including repeating meetings) and tasks, into a new Notes mailbox (NSF).");
         lblUpText.Text = D("將 .nsf 檔案拖放到呢度", "Drop an .nsf file here", "將 .pst 檔案拖放到呢度", "Drop a .pst file here");
-        lblUpHint.Text = D("建議使用郵箱副本 · 本機或者 Domino server 上嘅檔案都得", "Use a copy of the mailbox · local files and Domino server paths both work",
-                           "建議使用 PST 副本 · 轉換時唔好喺 Outlook 開住佢", "Use a copy of the PST · do not have it open in Outlook while converting");
+        lblUpHint.Text = D("建議使用郵箱副本　·　本機或者郵件伺服器上嘅檔案都得", "Use a copy of the mailbox · local files and mail server paths both work",
+                           "建議使用 PST 副本　·　轉換時唔好喺 Outlook 開住佢", "Use a copy of the PST · do not have it open in Outlook while converting");
         txtNsf.PlaceholderText = D("或者直接貼上 NSF 路徑", "...or paste the NSF path", "或者直接貼上 PST 路徑", "...or paste the PST path");
         lblOutLabel.Text = D("輸出 PST", "Output PST", "輸出 NSF", "Output NSF");
         txtPst.PlaceholderText = D("新 PST 檔案位置（揀咗 NSF 會自動填寫）", "New PST file (filled in when you pick the NSF)",
                                    "新 NSF 檔案位置（揀咗 PST 會自動填寫）", "New NSF file (filled in when you pick the PST)");
-        hintServer.Text = D("NSF 喺 server 上先填，留空即係本機檔案。", "Only if the NSF is on a server; leave empty for a local file.",
-                            "要喺 Domino server 上建立 NSF 先填，留空即係本機檔案。", "Only to create the NSF on a Domino server; leave empty for a local file.");
+        hintServer.Text = D("NSF 喺伺服器上先填；留空即係本機檔案。", "Only if the NSF is on a server; leave empty for a local file.",
+                            "要喺伺服器上建立 NSF 先填；留空即係本機檔案。", "Only to create the NSF on a server; leave empty for a local file.");
         hintUser.Text = D("留空會自動用郵箱主人嘅已讀記錄。", "Leave empty to use the mailbox owner's read marks.",
-                          "未讀標記會寫俾呢個用戶；留空用而家登入嘅 Notes 用戶。", "Unread marks are written for this user; leave empty for the current Notes user.");
-        lblFoot.Text = D("轉換期間 Notes 會更新 NSF 入面嘅索引，所以建議用郵箱嘅副本。　Enter = 開始　·　Ctrl+O = 揀檔案",
-                         "Notes updates indexes inside the NSF while converting, so work on a copy.    Enter = start  ·  Ctrl+O = open",
-                         "新 NSF 用 Notes 郵箱範本（mail12.ntf 等）建立；建議用 PST 副本。　Enter = 開始　·　Ctrl+O = 揀檔案",
-                         "The new NSF is created from the Notes mail template (mail12.ntf ...); work on a copy of the PST.    Enter = start  ·  Ctrl+O = open");
+                          "未讀標記會寫俾呢個用戶；留空用而家登入 Notes 嘅用戶。", "Unread marks are written for this user; leave empty for the current Notes user.");
+        lblFoot.Text = D("轉換期間 Notes 會改動原本嘅 NSF，所以建議用副本。　Enter：開始　·　Ctrl+O：揀檔案",
+                         "Notes changes the NSF while converting, so work on a copy.    Enter: start  ·  Ctrl+O: open",
+                         "新 NSF 會用 Notes 標準郵箱範本建立；建議用 PST 副本。　Enter：開始　·　Ctrl+O：揀檔案",
+                         "The new NSF is created from the standard Notes mail template; work on a copy of the PST.    Enter: start  ·  Ctrl+O: open");
         btnOpenOut.Text = D("開啟 PST 位置", "Show PST in folder", "開啟 NSF 位置", "Show NSF in folder"); btnOpenOut.Fit();
         foreach (var c in nsfOnly) c.Visible = !Rev;
         wordmark?.Invalidate(); stepper.Invalidate();
@@ -396,23 +400,23 @@ internal sealed class MainForm : Form
     void ToggleAdvanced()
     {
         advCard.Visible = !advCard.Visible;
-        lblAdvChevron.Text = advCard.Visible ? Ico.ChevronUp : Ico.ChevronDown;
+        advHead.Open = advCard.Visible;
     }
 
     void BuildRun()
     {
         viewRun = Column();
-        lblRunTitle.Text = L("轉換中", "Converting"); lblRunTitle.Font = Th.Ui(17f, FontStyle.Bold); lblRunTitle.ForeColor = Th.Text; lblRunTitle.AutoSize = true; lblRunTitle.BackColor = Th.Back;
+        lblRunTitle.Text = L("轉換中", "Converting"); lblRunTitle.Font = Th.Ui(Th.Heading, FontStyle.Bold); lblRunTitle.ForeColor = Th.Text; lblRunTitle.AutoSize = true; lblRunTitle.BackColor = Th.Back;
         viewRun.Controls.Add(lblRunTitle);
-        lblRunFile.Font = Th.Ui(9.75f); lblRunFile.ForeColor = Th.Muted; lblRunFile.AutoSize = true; lblRunFile.BackColor = Th.Back; lblRunFile.Margin = new Padding(0, 0, 0, S(18));
+        lblRunFile.Font = Th.Ui(Th.Body); lblRunFile.ForeColor = Th.Muted; lblRunFile.AutoSize = true; lblRunFile.BackColor = Th.Back; lblRunFile.Margin = new Padding(0, 0, 0, S(18));
         viewRun.Controls.Add(lblRunFile);
 
         var card = new Card { Dock = DockStyle.Top, Height = S(264), Padding = new Padding(S(28), S(24), S(28), S(24)), Margin = new Padding(0, 0, 0, S(16)) };
         stepper.Dock = DockStyle.Top; stepper.Height = S(70);
         lblPercent.Text = "0%"; lblPercent.Font = Th.Num(40f); lblPercent.ForeColor = Th.Text; lblPercent.AutoSize = true; lblPercent.BackColor = Th.Surface;
         progress.Dock = DockStyle.Top; progress.Height = S(10);
-        var detail = new Label { Name = "lblDetail", AutoSize = true, Font = Th.Ui(10f), ForeColor = Th.Muted, BackColor = Th.Surface };
-        lblElapsed.AutoSize = true; lblElapsed.Font = Th.Ui(9.25f); lblElapsed.ForeColor = Th.Muted; lblElapsed.BackColor = Th.Surface;
+        var detail = new Label { Name = "lblDetail", AutoSize = true, Font = Th.Ui(Th.Body), ForeColor = Th.Muted, BackColor = Th.Surface };
+        lblElapsed.AutoSize = true; lblElapsed.Font = Th.Ui(Th.Body); lblElapsed.ForeColor = Th.Muted; lblElapsed.BackColor = Th.Surface;
         var mid = new Panel { Dock = DockStyle.Top, Height = S(92), BackColor = Th.Surface };
         mid.Controls.AddRange(new Control[] { lblPercent, lblElapsed });
         mid.Resize += (_, _) => { lblPercent.Location = new Point(0, S(14)); lblElapsed.Location = new Point(mid.Width - lblElapsed.Width, S(52)); };
@@ -422,6 +426,7 @@ internal sealed class MainForm : Form
         progress.ValueChanged += () =>
         {
             lblPercent.Text = $"{progress.Value / 10}%";
+            progress.AccessibleName = L("進度 ", "Progress ") + lblPercent.Text;
             if (child != null && IsHandleCreated) Taskbar.Set(Handle, progress.Value, 1000);
         };
         lblStatus.TextChanged += (_, _) => detail.Text = lblStatus.Text;
@@ -438,8 +443,8 @@ internal sealed class MainForm : Form
         viewDone = Column();
         hero.Dock = DockStyle.Top; hero.Height = S(112); hero.Margin = new Padding(0, 0, 0, S(16));
         lblDoneIcon.AutoSize = true; lblDoneIcon.Font = Ico.Font(34f); lblDoneIcon.Location = new Point(S(28), S(26));
-        lblDoneTitle.AutoSize = true; lblDoneTitle.Font = Th.Ui(16f, FontStyle.Bold); lblDoneTitle.ForeColor = Th.Text; lblDoneTitle.Location = new Point(S(96), S(24));
-        lblDoneSub.AutoSize = true; lblDoneSub.Font = Th.Ui(9.75f); lblDoneSub.ForeColor = Th.Muted; lblDoneSub.Location = new Point(S(97), S(60));
+        lblDoneTitle.AutoSize = true; lblDoneTitle.Font = Th.Ui(Th.Heading, FontStyle.Bold); lblDoneTitle.ForeColor = Th.Text; lblDoneTitle.Location = new Point(S(96), S(24));
+        lblDoneSub.AutoSize = true; lblDoneSub.Font = Th.Ui(Th.Body); lblDoneSub.ForeColor = Th.Muted; lblDoneSub.Location = new Point(S(97), S(60));
         hero.Controls.AddRange(new Control[] { lblDoneIcon, lblDoneTitle, lblDoneSub });
         // long reasons wrap inside the card, and the card grows with them
         void FitSub()
@@ -451,14 +456,19 @@ internal sealed class MainForm : Form
         lblDoneSub.TextChanged += (_, _) => FitSub();
         viewDone.Controls.Add(hero);
 
-        var tileRow = new TableLayoutPanel { Dock = DockStyle.Top, Height = S(96), ColumnCount = 5, BackColor = Th.Back, Margin = new Padding(0, 0, 0, S(16)) };
+        // the actions come right after the result, before the details (the log panel can cover the bottom of the window)
+        var actions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top, WrapContents = true, BackColor = Th.Back, Margin = new Padding(0, 0, 0, S(6)) };
+        foreach (var b in new[] { btnOpenOut, btnSummary, btnOpenLog, btnAgain }) { b.Margin = new Padding(0, 0, S(8), S(8)); actions.Controls.Add(b); }
+        viewDone.Controls.Add(actions);
+
+        tileRow.Dock = DockStyle.Top; tileRow.Height = S(96); tileRow.ColumnCount = 5; tileRow.BackColor = Th.Back; tileRow.Margin = new Padding(0, 0, 0, S(16));
         foreach (var (key, label, glyph) in new[] { ("mail", L("郵件", "Mail"), Ico.Mail), ("contact", L("聯絡人", "Contacts"), Ico.Contact), ("cal", L("日曆項目", "Calendar"), Ico.Calendar),
                                                    ("unread", L("未讀", "Unread"), Ico.Unread), ("fail", L("失敗", "Failed"), Ico.Warning) })
         {
             tileRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20));
             var t = new Card { Dock = DockStyle.Fill, Margin = new Padding(key == "mail" ? 0 : S(6), 0, key == "fail" ? 0 : S(6), 0), Padding = new Padding(S(16), S(12), S(8), S(8)) };
             var ic = new Label { Text = glyph, Font = Ico.Font(11f), ForeColor = Th.Accent, AutoSize = true, BackColor = Th.Surface, Location = new Point(S(16), S(14)) };
-            var cap = new Label { Text = label, Font = Th.Ui(9f), ForeColor = Th.Muted, AutoSize = true, BackColor = Th.Surface, Location = new Point(S(38), S(13)) };
+            var cap = new Label { Text = label, Font = Th.Ui(Th.Small), ForeColor = Th.Muted, AutoSize = true, BackColor = Th.Surface, Location = new Point(S(38), S(13)) };
             var v = new Label { Text = "–", Font = Th.Num(19f), ForeColor = Th.Text, AutoSize = true, BackColor = Th.Surface, Location = new Point(S(14), S(38)) };
             t.Controls.AddRange(new Control[] { ic, cap, v });
             tiles[key] = v; tileCards[key] = t;
@@ -467,14 +477,10 @@ internal sealed class MainForm : Form
         viewDone.Controls.Add(tileRow);
 
         var tableCard = new Card { Dock = DockStyle.Top, Height = S(300), Padding = new Padding(S(20), S(16), S(20), S(16)), Margin = new Padding(0, 0, 0, S(16)), Name = "tableCard" };
-        var tTitle = new Label { Text = L("資料夾核對", "Folder check"), Font = Th.Ui(11f, FontStyle.Bold), ForeColor = Th.Text, AutoSize = true, BackColor = Th.Surface, Dock = DockStyle.Top, Padding = new Padding(0, 0, 0, S(10)) };
+        var tTitle = new Label { Text = L("資料夾核對", "Folder check"), Font = Th.Ui(Th.Title, FontStyle.Bold), ForeColor = Th.Text, AutoSize = true, BackColor = Th.Surface, Dock = DockStyle.Top, Padding = new Padding(0, 0, 0, S(10)) };
         StyleGrid();
         tableCard.Controls.Add(grid); tableCard.Controls.Add(tTitle);
         viewDone.Controls.Add(tableCard);
-
-        var actions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top, WrapContents = true, BackColor = Th.Back, Margin = new Padding(0) };
-        foreach (var b in new[] { btnOpenOut, btnOpenLog, btnSummary, btnAgain }) { b.Margin = new Padding(0, 0, S(10), S(10)); actions.Controls.Add(b); }
-        viewDone.Controls.Add(actions);
     }
 
     void StyleGrid()
@@ -486,9 +492,9 @@ internal sealed class MainForm : Form
         grid.EnableHeadersVisualStyles = false; grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
         grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing; grid.ColumnHeadersHeight = S(34);
         grid.RowTemplate.Height = S(34);
-        grid.ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle { BackColor = Th.Surface, ForeColor = Th.Muted, Font = Th.Ui(9f, FontStyle.Bold), SelectionBackColor = Th.Surface, SelectionForeColor = Th.Muted, Padding = new Padding(S(4), 0, 0, 0) };
-        grid.DefaultCellStyle = new DataGridViewCellStyle { BackColor = Th.Surface, ForeColor = Th.Text, Font = Th.Ui(9.5f), SelectionBackColor = Th.AccentSoft, SelectionForeColor = Th.Text, Padding = new Padding(S(4), 0, 0, 0) };
-        grid.Columns.Add("folder", L("資料夾", "Folder")); grid.Columns.Add("exp", "NSF"); grid.Columns.Add("pst", "PST"); grid.Columns.Add("unread", L("未讀 NSF / PST", "Unread NSF / PST")); grid.Columns.Add("ok", L("核對", "Check"));
+        grid.ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle { BackColor = Th.Surface, ForeColor = Th.Muted, Font = Th.Ui(Th.Small, FontStyle.Bold), SelectionBackColor = Th.Surface, SelectionForeColor = Th.Muted, Padding = new Padding(S(4), 0, 0, 0) };
+        grid.DefaultCellStyle = new DataGridViewCellStyle { BackColor = Th.Surface, ForeColor = Th.Text, Font = Th.Ui(Th.Body), SelectionBackColor = Th.AccentSoft, SelectionForeColor = Th.Text, Padding = new Padding(S(4), 0, 0, 0) };
+        grid.Columns.Add("folder", L("資料夾", "Folder")); grid.Columns.Add("exp", "NSF"); grid.Columns.Add("pst", "PST"); grid.Columns.Add("unread", L("未讀 NSF / PST", "Unread NSF / PST")); grid.Columns.Add("ok", L("一致", "Match"));
         grid.Columns["folder"]!.FillWeight = 46; grid.Columns["exp"]!.FillWeight = 12; grid.Columns["pst"]!.FillWeight = 12; grid.Columns["unread"]!.FillWeight = 18; grid.Columns["ok"]!.FillWeight = 12;
         foreach (var c in new[] { "exp", "pst", "unread" }) { grid.Columns[c]!.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleRight; grid.Columns[c]!.HeaderCell.Style.Alignment = DataGridViewContentAlignment.MiddleRight; }
         grid.Columns["ok"]!.HeaderCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
@@ -506,6 +512,7 @@ internal sealed class MainForm : Form
         host.ResumeLayout();
         host.AutoScrollPosition = new Point(0, 0);
         AcceptButton = view == viewSetup ? btnStart : null;
+        lblStatus.Visible = view != viewRun;   // the run card shows the same status in large
         btnLang.Enabled = btnTheme.Enabled = view != viewRun;
     }
 
@@ -554,27 +561,28 @@ internal sealed class MainForm : Form
             lblFileName.Text = fi.Name;
             lblFileMeta.Text = $"{SizeText(fi.Length)}　·　{L("修改於", "modified")} {fi.LastWriteTime:yyyy-MM-dd HH:mm}";
             if (txtPst.Text.Trim().Length == 0) txtPst.Text = Path.Combine(fi.DirectoryName!, Path.GetFileNameWithoutExtension(fi.Name) + (Rev ? ".nsf" : ".pst"));
-            if (envOk) SetStatus(L("準備好，可以開始轉換。", "Ready to convert."));
         }
+        if (!envOk) SetStatus(L("缺少必要軟件，未能轉換。", "Missing required software; cannot convert."), Tone.Bad);
+        else if (exists) SetStatus(L("準備好，可以開始轉換。", "Ready to convert."));
         else if (p.Length > 0 && Rev) SetStatus(L("搵唔到呢個 PST 檔案。", "PST file not found."), Tone.Warn);
-        else if (p.Length > 0) SetStatus(txtServer.Text.Trim().Length > 0 ? L("會喺 Domino server 開啟呢個郵箱。", "The mailbox will be opened on the Domino server.") : L("搵唔到呢個 NSF 檔案。", "NSF file not found."),
+        else if (p.Length > 0) SetStatus(txtServer.Text.Trim().Length > 0 ? L("會喺郵件伺服器開啟呢個郵箱。", "The mailbox will be opened on the mail server.") : L("搵唔到呢個 NSF 檔案。", "NSF file not found."),
                                          txtServer.Text.Trim().Length > 0 ? Tone.Normal : Tone.Warn);
         else SetStatus(D("請選擇 NSF 檔案。", "Choose an NSF file.", "請選擇 PST 檔案。", "Choose a PST file."));
         dropEmpty.Visible = !exists; dropFile.Visible = exists;
         dropZone.Dashed = !exists; dropZone.Height = S(exists ? 168 : 232); dropZone.Invalidate();
-        btnStart.Enabled = p.Length > 0 && child == null;
+        btnStart.Enabled = envOk && p.Length > 0 && child == null;
     }
 
     void UpdateAdvSummary()
     {
         var parts = new List<string>();
-        if (txtServer.Text.Trim().Length > 0) parts.Add("Server");
+        if (txtServer.Text.Trim().Length > 0) parts.Add(L("伺服器", "Server"));
         if (!Rev && txtDir.Text.Trim().Length > 0) parts.Add(L("通訊錄", "Directory"));
         if (txtUser.Text.Trim().Length > 0) parts.Add(L("已讀用戶", "Read user"));
         if (!Rev && txtId.Text.Trim().Length > 0) parts.Add("Notes ID");
-        if (chkAnon.Checked) parts.Add(L("隱藏資料夾名", "Hidden folder names"));
-        lblAdvSummary.Text = parts.Count == 0 ? L("全部選填 · 用預設值", "All optional · using defaults") : string.Join(" · ", parts);
-        lblAdvSummary.ForeColor = parts.Count == 0 ? Th.Muted : Th.Accent;
+        if (chkAnon.Checked) parts.Add(L("報告唔顯示資料夾名", "Report without folder names"));
+        advHead.Summary = parts.Count == 0 ? L("全部選填　·　用預設值", "All optional · using defaults") : string.Join(L("　·　", " · "), parts);
+        advHead.SummarySet = parts.Count > 0;
     }
 
     static string SizeText(long b) => b >= 1L << 30 ? $"{b / (double)(1L << 30):N2} GB" : b >= 1L << 20 ? $"{b / (double)(1L << 20):N1} MB" : $"{b / 1024.0:N0} KB";
@@ -603,17 +611,16 @@ internal sealed class MainForm : Form
         bool outlook = new[] { @"%ProgramFiles%\Microsoft Office\root\Office16\OLMAPI32.DLL", @"%ProgramFiles%\Microsoft Office\Office16\OLMAPI32.DLL" }
             .Any(p => File.Exists(Environment.ExpandEnvironmentVariables(p)));
         envOk = notes && outlook;
-        lblEnv.Text = $"{(notes ? "●" : "○")} Notes      {(outlook ? "●" : "○")} Outlook 64-bit";
-        lblEnv.ForeColor = envOk ? Th.Ok : Th.Bad;
-        Log(L($"環境檢查：Notes client {(notes ? "✓" : "✗ 搵唔到（需要 64-bit HCL Notes）")}，Outlook 64-bit {(outlook ? "✓" : "✗ 搵唔到（需要 64-bit Outlook）")}",
-              $"Environment: Notes client {(notes ? "✓" : "✗ not found (64-bit HCL Notes required)")}, Outlook 64-bit {(outlook ? "✓" : "✗ not found (64-bit Outlook required)")}"));
+        Log(L($"環境檢查：Notes {(notes ? "✓" : "✗ 搵唔到（需要 64 位元 HCL Notes）")}，Outlook {(outlook ? "✓" : "✗ 搵唔到（需要 64 位元 Outlook）")}",
+              $"Environment: Notes {(notes ? "✓" : "✗ not found (64-bit HCL Notes required)")}, Outlook {(outlook ? "✓" : "✗ not found (64-bit Outlook required)")}"));
         if (!envOk)
         {
-            var missing = string.Join(L("、", ", "), new[] { notes ? null : "64-bit HCL Notes", outlook ? null : "64-bit Outlook" }.Where(x => x != null));
-            lblEnvWarn.Text = L($"  缺少必要軟件：{missing}。未能轉換。", $"  Missing required software: {missing}. Cannot convert.");
+            var missing = string.Join(L("、", ", "), new[] { notes ? null : L("64 位元 HCL Notes", "64-bit HCL Notes"), outlook ? null : L("64 位元 Outlook", "64-bit Outlook") }.Where(x => x != null));
+            lblEnvWarn.Text = L($"缺少必要軟件：{missing}。裝好之後再開過呢個程式。", $"Missing required software: {missing}. Install it, then reopen this program.");
             lblEnvWarn.Visible = true;
             SetStatus(L("缺少必要軟件，未能轉換。", "Missing required software; cannot convert."), Tone.Bad);
         }
+        NsfChanged();
     }
 
     void PickNsf()
@@ -662,7 +669,7 @@ internal sealed class MainForm : Form
         string nsfPath = Rev ? dst : src;
         if ((Rev ? !dstOnServer : server.Length == 0) && Encoding.UTF8.GetByteCount(nsfPath) > NsfExport.NotesApi.MaxPathBytes)
         {
-            MessageBox.Show(this, L($"NSF 嘅路徑太長，Notes 開唔到（上限大約 {NsfExport.NotesApi.MaxPathBytes} bytes，每個中文字佔 3 bytes）。請將檔案放去較短嘅 folder 或者用較短嘅檔名。\n\n{nsfPath}",
+            MessageBox.Show(this, L($"NSF 嘅路徑太長，Notes 開唔到（上限大約 {NsfExport.NotesApi.MaxPathBytes} 位元組，每個中文字佔 3 個）。請將檔案放去較短嘅資料夾或者用較短嘅檔名。\n\n{nsfPath}",
                                     $"The NSF path is too long for Notes (about {NsfExport.NotesApi.MaxPathBytes} bytes; a Chinese character takes 3). Use a shorter folder or file name.\n\n{nsfPath}"), Text,
                             MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
@@ -680,7 +687,7 @@ internal sealed class MainForm : Form
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
         {
-            MessageBox.Show(this, L($"冇權限寫入輸出位置，請揀另一個 folder。\n\n{ex.Message}", $"The output location cannot be written to. Choose another folder.\n\n{ex.Message}"), Text,
+            MessageBox.Show(this, L($"冇權限寫入輸出位置，請揀另一個資料夾。\n\n{ex.Message}", $"The output location cannot be written to. Choose another folder.\n\n{ex.Message}"), Text,
                             MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
@@ -688,7 +695,7 @@ internal sealed class MainForm : Form
 
         SetRunning(true);
         txtLog.Clear();
-        lastFatal = null;
+        lastFatal = null; unreadFailed = false; writeFails.Clear(); report = null; folderRows = new();
         foreach (var t in tiles.Values) { t.Text = "–"; t.ForeColor = Th.Text; }
         lblRunTitle.Text = L("轉換中", "Converting");
         lblRunFile.Text = $"{Path.GetFileName(src)}  →  {Path.GetFileName(dst)}";
@@ -707,19 +714,19 @@ internal sealed class MainForm : Form
             if (user.Length > 0) exportArgs.AddRange(new[] { "--user", user });
             if (id.Length > 0) exportArgs.AddRange(new[] { "--id", id });
             if (txtDir.Text.Trim().Length > 0) exportArgs.AddRange(new[] { "--directory", txtDir.Text.Trim() });
-            SetStatus(L("第 1 步：由 Notes 匯出信件 ...", "Step 1: exporting mail from Notes ..."));
+            SetStatus(L("第 1 步：由 Notes 匯出信件…", "Step 1: exporting mail from Notes…"));
             int rc1 = await RunChild(exportArgs, 0, 700, password: id.Length > 0 ? txtPwd.Text : null);
             if (stopRequested) { SetStatus(L("已停止。", "Stopped."), Tone.Warn); stopped = true; return; }
-            if (rc1 != 0 && rc1 != 1) { SetStatus(L("匯出失敗，請睇記錄。", "Export failed - see the log."), Tone.Bad); failText = L("匯出失敗", "export failed"); return; }   // 1 = some mails failed, still continue
+            if (rc1 != 0 && rc1 != 1) { SetStatus(L("匯出失敗。", "Export failed."), Tone.Bad); failText = L("匯出失敗", "export failed"); return; }   // 1 = some mails failed, still continue
 
             stepper.Current = 1;
-            SetStatus(L("第 2 步：寫入 PST ...", "Step 2: writing the PST ..."));
-            int rc2 = await RunChild(new List<string> { "import", pst, Path.Combine(workDir, "manifest.jsonl") }, 700, 950);
+            SetStatus(L("第 2 步：寫入 PST…", "Step 2: writing the PST…"));
+            int rc2 = await RunChild(new List<string> { "import", pst, Path.Combine(workDir, "manifest.jsonl") }, 700, 950, fails: writeFails);
             if (stopRequested) { SetStatus(L("已停止。", "Stopped."), Tone.Warn); stopped = true; return; }
-            if (rc2 != 0 && rc2 != 1) { SetStatus(L("寫入 PST 失敗，請睇記錄。", "Writing the PST failed - see the log."), Tone.Bad); failText = L("寫入 PST 失敗", "writing the PST failed"); return; }
+            if (rc2 != 0 && rc2 != 1) { SetStatus(L("寫入 PST 失敗。", "Writing the PST failed."), Tone.Bad); failText = L("寫入 PST 失敗", "writing the PST failed"); return; }
 
             stepper.Current = 2;
-            SetStatus(L("第 3 步：核對 ...", "Step 3: verifying ..."));
+            SetStatus(L("第 3 步：核對數量…", "Step 3: verifying…"));
             var counts = new List<string>();
             await RunChild(new List<string> { "counts", pst }, 950, 1000, counts);
             allOk = FinishSummary(nsf, pst, counts);
@@ -728,7 +735,7 @@ internal sealed class MainForm : Form
         catch (Exception ex)
         {
             Log(L("錯誤：", "Error: ") + ex.Message);
-            SetStatus(L("出錯，請睇記錄。", "Error - see the log."), Tone.Bad);
+            SetStatus(L("出錯。", "Error."), Tone.Bad);
             failText = L("出錯", "error");
         }
         finally
@@ -761,33 +768,34 @@ internal sealed class MainForm : Form
     async Task<(bool finished, bool allOk, bool stopped, string failText)> RunPstToNsf(string pst, string nsf, string server, string user)
     {
         var srvArgs = server.Length > 0 ? new[] { "--server", server } : Array.Empty<string>();
-        SetStatus(L("第 1 步：由 PST 讀取信件 ...", "Step 1: reading mail from the PST ..."));
+        SetStatus(L("第 1 步：由 PST 讀取信件…", "Step 1: reading mail from the PST…"));
         int rc1 = await RunChild(new List<string> { "pst-export", pst, workDir }, 0, 450);
         if (stopRequested) { SetStatus(L("已停止。", "Stopped."), Tone.Warn); return (false, false, true, ""); }
-        if (rc1 != 0 && rc1 != 1) { SetStatus(L("讀取 PST 失敗，請睇記錄。", "Reading the PST failed - see the log."), Tone.Bad); return (false, false, false, L("讀取 PST 失敗", "reading the PST failed")); }
+        if (rc1 != 0 && rc1 != 1) { SetStatus(L("讀取 PST 失敗。", "Reading the PST failed."), Tone.Bad); return (false, false, false, L("讀取 PST 失敗", "reading the PST failed")); }
 
         stepper.Current = 1;
-        SetStatus(L("第 2 步：寫入 NSF ...", "Step 2: writing the NSF ..."));
+        SetStatus(L("第 2 步：寫入 NSF…", "Step 2: writing the NSF…"));
         var importArgs = new List<string> { "nsf-import", nsf, Path.Combine(workDir, "manifest.jsonl") };
         importArgs.AddRange(srvArgs);
         if (user.Length > 0) importArgs.AddRange(new[] { "--user", user });
-        int rc2 = await RunChild(importArgs, 450, 900);
+        int rc2 = await RunChild(importArgs, 450, 900, fails: writeFails);
         if (stopRequested) { SetStatus(L("已停止。", "Stopped."), Tone.Warn); return (false, false, true, ""); }
-        if (rc2 != 0 && rc2 != 1) { SetStatus(L("寫入 NSF 失敗，請睇記錄。", "Writing the NSF failed - see the log."), Tone.Bad); return (false, false, false, L("寫入 NSF 失敗", "writing the NSF failed")); }
+        if (rc2 != 0 && rc2 != 1) { SetStatus(L("寫入 NSF 失敗。", "Writing the NSF failed."), Tone.Bad); return (false, false, false, L("寫入 NSF 失敗", "writing the NSF failed")); }
         // unread marks: a separate C-API-only process (see NsfImportTool.MarkUnread)
         var markArgs = new List<string> { "nsf-mark-unread", nsf, Path.Combine(workDir, "unread_ids.txt") };
         markArgs.AddRange(srvArgs);
         int rc3 = await RunChild(markArgs, 900, 950);
-        if (rc3 != 0) Log(L("警告：未讀標記寫入失敗。", "Warning: the unread marks could not be written."));
+        unreadFailed = rc3 != 0;
+        if (unreadFailed) Log(L("警告：未讀標記寫入失敗。", "Warning: the unread marks could not be written."));
 
         stepper.Current = 2;
-        SetStatus(L("第 3 步：核對 ...", "Step 3: verifying ..."));
+        SetStatus(L("第 3 步：核對數量…", "Step 3: verifying…"));
         var counts = new List<string>();
         var countArgs = new List<string> { "nsf-counts", nsf };
         countArgs.AddRange(srvArgs);
         if (user.Length > 0) countArgs.AddRange(new[] { "--user", user });
         await RunChild(countArgs, 950, 1000, counts);
-        bool allOk = FinishSummary(nsf, pst, counts);
+        bool allOk = FinishSummary(nsf, pst, counts) && !unreadFailed;
         return (true, allOk, false, "");
     }
 
@@ -797,16 +805,16 @@ internal sealed class MainForm : Form
         // the counts output may contain Notes console messages; only "folder TAB items TAB unread" lines count
         var summary = BuildSummary(nsf, pst, counts.Where(c => c.Contains('\t')).ToList(), (DateTime.Now - runStart).TotalSeconds, chkAnon.Checked, out bool allOk);
         File.WriteAllLines(Path.Combine(workDir, "summary.txt"), summary, new UTF8Encoding(true));
-        try { File.WriteAllText(Path.Combine(workDir, "summary.html"), ReportHtml(allOk), new UTF8Encoding(false)); } catch (Exception ex) { Log("summary.html: " + ex.Message); }
+        try { File.WriteAllText(Path.Combine(workDir, "summary.html"), ReportHtml(allOk, chkAnon.Checked), new UTF8Encoding(false)); } catch (Exception ex) { Log("summary.html: " + ex.Message); }
         Log("");
         foreach (var l in summary) Log(l);
         UpdateTiles(summary);
         Log("");
-        Log(L("摘要檔（只有數字，可以對外提供）：", "Summary files (numbers only, safe to share): ") + Path.Combine(workDir, "summary.txt") + " / summary.html");
+        Log(L("摘要檔：", "Summary files: ") + Path.Combine(workDir, "summary.txt") + " / summary.html");
         progress.Value = 1000;
         stepper.Current = 3;
-        if (allOk) SetStatus(L("完成 ✓ 所有 folder 數量核對正確。", "Done ✓ All folder counts match."), Tone.Ok);
-        else SetStatus(L("完成，但有 folder 數量對唔上，請睇摘要。", "Done, but some folder counts do not match - see the summary."), Tone.Warn);
+        if (allOk) SetStatus(L("完成：每個資料夾數量一致，冇失敗項目。", "Done: every folder matches, nothing failed."), Tone.Ok);
+        else SetStatus(L("完成，但有項目未轉換或者數量唔一致。", "Done, but some items were not converted or counts do not match."), Tone.Warn);
         return allOk;
     }
 
@@ -818,9 +826,21 @@ internal sealed class MainForm : Form
             lblDoneIcon.Text = allOk ? Ico.Completed : Ico.Warning;
             lblDoneIcon.ForeColor = allOk ? Th.Ok : Th.Warn;
             tint = allOk ? Th.OkSoft : Th.WarnSoft;
-            lblDoneTitle.Text = allOk ? L("轉換完成", "Conversion complete") : L("轉換完成，但有資料夾數量對唔上", "Converted, but some folder counts do not match");
+            int failed = report?.Failed ?? 0, badFolders = folderRows.Count(r => !r.ok);
+            lblDoneTitle.Text = allOk ? L("全部轉換完成", "Everything was converted")
+                : failed > 0 ? L($"已轉換，但有 {failed:N0} 項未能轉換", $"Converted, but {failed:N0} item(s) could not be converted")
+                : L($"已轉換，但有 {badFolders:N0} 個資料夾數量唔一致", $"Converted, but {badFolders:N0} folder(s) do not match");
             long size = File.Exists(pst) ? new FileInfo(pst).Length : 0;   // pst = the output file (an NSF in PST -> NSF mode)
-            lblDoneSub.Text = $"{L("用時", "Took")} {Elapsed()}　·　{(Rev ? "NSF" : "PST")} {SizeText(size)}　·　{Path.GetFileName(pst)}";
+            var lines = new List<string> { $"{L("用時", "Took")} {Elapsed()}　·　{(Rev ? "NSF" : "PST")} {SizeText(size)}　·　{Path.GetFileName(pst)}" };
+            // the reasons of failed items, most frequent first (the full list is in the item log)
+            if (report != null && failed > 0)
+            {
+                foreach (var (reason, count) in report.Fails.Take(3)) lines.Add($"{count:N0} × {reason}");
+                if (report.Fails.Count > 3) lines.Add(L($"…其餘原因見「逐項記錄」。", "…see the item log for the other reasons."));
+            }
+            if (badFolders > 0) lines.Add(L("數量唔一致嘅資料夾喺下面標咗 ✗。", "Folders that do not match are marked ✗ below."));
+            if (unreadFailed) lines.Add(L("未讀標記寫入失敗：所有信件會顯示為已讀。", "The unread marks could not be written: all mail will show as read."));
+            lblDoneSub.Text = string.Join("\n", lines);
         }
         else
         {
@@ -831,7 +851,8 @@ internal sealed class MainForm : Form
             var lines = new List<string>();
             if (!stopped && lastFatal != null) lines.Add(FriendlyFatal(lastFatal));
             if (incomplete != null) lines.Add(L($"未完成嘅檔案已改名做 {Path.GetFileName(incomplete)}，唔好當完整郵箱使用。", $"The incomplete file was renamed to {Path.GetFileName(incomplete)} - do not use it as a complete mailbox."));
-            if (lines.Count == 0) lines.Add(L("撳下面嘅「顯示詳細記錄」睇原因。", "Open \"Show details\" below to see why."));
+            if (lines.Count == 0) lines.Add(stopped ? L("轉換喺完成之前停咗，冇產生完整嘅輸出檔。", "The conversion was stopped before it finished; no complete output file was made.")
+                                                    : L("原因見下面嘅詳細記錄。", "The details below show why."));
             lblDoneSub.Text = string.Join("\n", lines);
         }
         hero.Fill = tint; hero.Border = Color.Empty; hero.Invalidate();
@@ -848,8 +869,11 @@ internal sealed class MainForm : Form
         }
         var tableCard = viewDone.Controls["tableCard"]!;
         tableCard.Height = S(66) + grid.ColumnHeadersHeight + Math.Min(Math.Max(folderRows.Count, 1), 10) * grid.RowTemplate.Height;
-        tableCard.Visible = finished;
-        btnOpenOut.Enabled = btnOpenLog.Enabled = btnSummary.Enabled = finished;
+        // a run that did not finish has no numbers: show only what can be acted on (no empty tiles, no dead buttons)
+        tableCard.Visible = tileRow.Visible = finished;
+        btnOpenOut.Visible = btnSummary.Visible = finished;
+        btnOpenOut.Enabled = finished && File.Exists(pst);   // an NSF created on a server has no local file to show
+        btnOpenLog.Visible = File.Exists(Path.Combine(workDir, "export_log.csv"));
         ShowView(viewDone);
         if (!finished && !logPanel.Visible) ToggleLog();
 
@@ -859,7 +883,7 @@ internal sealed class MainForm : Form
     }
 
     /// <summary>Runs this exe with the given arguments, streams its output to the log and maps PROGRESS lines to the bar.</summary>
-    Task<int> RunChild(List<string> args, int from, int to, List<string>? capture = null, string? password = null)
+    Task<int> RunChild(List<string> args, int from, int to, List<string>? capture = null, string? password = null, List<string>? fails = null)
     {
         var psi = new ProcessStartInfo(Environment.ProcessPath!)
         {
@@ -871,29 +895,47 @@ internal sealed class MainForm : Form
         if (password != null) psi.Environment["NOTES_ID_PASSWORD"] = password;   // never on the command line
         var tcs = new TaskCompletionSource<int>();
         var p = new Process { StartInfo = psi, EnableRaisingEvents = true };
+        // progress arrives every few items: only the latest value is shown, at most 10 times a second (one repaint instead
+        // of one per line); the other lines are rare and go straight to the log
+        (int done, int total)? latest = null, shown = null;
+        var gate = new object();
+        var pump = new System.Windows.Forms.Timer { Interval = 100 };
+        void ShowProgress()
+        {
+            (int done, int total)? now; lock (gate) now = latest;
+            if (now is not { } v || now == shown) return;
+            shown = now;
+            progress.Value = Math.Min(1000, from + (int)((long)(to - from) * v.done / v.total));
+            lblStatus.Text = $"{statusBase}{L("（", " (")}{v.done:N0} / {v.total:N0}{L("）", ")")}";
+        }
+        pump.Tick += (_, _) => ShowProgress();
+        pump.Start();
         void OnLine(string? line)
         {
             if (line == null) return;
             if (IsNoise(line)) return;
+            if (line.StartsWith("PROGRESS "))
+            {
+                var parts = line.Split(' ');
+                if (parts.Length == 3 && int.TryParse(parts[1], out int done) && int.TryParse(parts[2], out int total) && total > 0)
+                    lock (gate) latest = (done, total);
+                return;
+            }
             BeginInvoke(() =>
             {
-                if (line.StartsWith("PROGRESS "))
-                {
-                    var parts = line.Split(' ');
-                    if (parts.Length == 3 && int.TryParse(parts[1], out int done) && int.TryParse(parts[2], out int total) && total > 0)
-                    {
-                        progress.Value = Math.Min(1000, from + (int)((long)(to - from) * done / total));
-                        lblStatus.Text = $"{statusBase}{L("（", " (")}{done:N0} / {total:N0}{L("）", ")")}";
-                    }
-                }
-                else if (line.StartsWith("fatal: ")) { lastFatal = line[7..]; Log("  " + line); }
+                if (line.StartsWith("fatal: ")) { lastFatal = line[7..]; Log("  " + line); }
+                else if (fails != null && line.StartsWith("FAILED ")) { fails.Add(line); Log("  " + line); }
                 else if (capture != null) capture.Add(line);
                 else Log("  " + line);
             });
         }
         p.OutputDataReceived += (_, e) => OnLine(e.Data);
         p.ErrorDataReceived += (_, e) => OnLine(e.Data);
-        p.Exited += (_, _) => { p.WaitForExit(); BeginInvoke(() => { child = null; tcs.TrySetResult(p.ExitCode); }); };
+        p.Exited += (_, _) =>
+        {
+            p.WaitForExit();   // all output read
+            BeginInvoke(() => { pump.Dispose(); ShowProgress(); child = null; int rc = p.ExitCode; p.Dispose(); tcs.TrySetResult(rc); });
+        };
         child = p;
         p.Start();
         p.BeginOutputReadLine();
@@ -915,7 +957,7 @@ internal sealed class MainForm : Form
     void SetRunning(bool running)
     {
         stopRequested = false;
-        btnStart.Enabled = !running && txtNsf.Text.Trim().Length > 0;
+        btnStart.Enabled = !running && envOk && txtNsf.Text.Trim().Length > 0;
         btnNsf.Enabled = btnPst.Enabled = btnId.Enabled = btnDir.Enabled = !running;
         txtNsf.ReadOnly = txtPst.ReadOnly = txtServer.ReadOnly = txtUser.ReadOnly = txtId.ReadOnly = txtPwd.ReadOnly = txtDir.ReadOnly = running;
         btnStop.Enabled = running;
@@ -965,11 +1007,13 @@ internal sealed class MainForm : Form
         string renameFile = Path.Combine(workDir, "folder_renames.txt");
         if (Rev && File.Exists(renameFile))
             foreach (var l in File.ReadAllLines(renameFile, Encoding.UTF8)) if (l.Split('\t') is { Length: 2 } p) renames.Add((p[0], p[1]));
+        // an exact rename first (a sub folder can be renamed again, e.g. shortened), else the longest renamed parent
         string Original(string name)
         {
             foreach (var (from, to) in renames)
                 if (name.Equals(to, StringComparison.OrdinalIgnoreCase)) return from;
-                else if (name.StartsWith(to + "\\", StringComparison.OrdinalIgnoreCase)) return from + name[to.Length..];
+            foreach (var (from, to) in renames.OrderByDescending(x => x.to.Length))
+                if (name.StartsWith(to + "\\", StringComparison.OrdinalIgnoreCase)) return from + name[to.Length..];
             return name;
         }
         var actual = new Dictionary<string, (int total, int unread)>();
@@ -985,18 +1029,21 @@ internal sealed class MainForm : Form
 
         var log = ReadLog();
         int Count(Func<string[], bool> pred) => log.Count(pred);
+        // items read fine but not written (second step): only on its console, as "FAILED line N (what): reason"
+        var writeReasons = writeFails.Select(l => Regex.Match(l, @"^FAILED line \d+(?: \([^)]*\))?: (.*)$") is { Success: true } m ? m.Groups[1].Value : l).ToList();
+        int failedAll = Count(IsFail) + writeReasons.Count;
+        var failGroups = log.Where(IsFail).Select(FailReason).Concat(writeReasons).GroupBy(x => x).Select(g => (g.Key, g.Count())).OrderByDescending(x => x.Item2).ToList();
         string statsFile = Path.Combine(workDir, "address_stats.txt");
         int addrOk = 0, addrBad = 0;
         if (File.Exists(statsFile) && File.ReadAllText(statsFile).Split('\t') is { Length: 3 } ast) { int.TryParse(ast[0], out addrOk); int.TryParse(ast[1], out addrBad); }
         report = new Stats(log.Count, Count(l => l[3].StartsWith("exported")), Count(l => l[3] == "contact" || l[3].StartsWith("group (")), Count(l => l[3].StartsWith("appointment")),
-            Count(l => l[3].Contains("calendar (tentative)")), Count(l => l[3] == "exported (encrypted)"), Count(l => l[3].StartsWith("skipped")), Count(l => l[3].StartsWith("FAILED")),
-            Count(l => l[5] == "yes"), seconds, File.Exists(nsf) ? new FileInfo(nsf).Length : 0, new FileInfo(pst).Length, addrOk, addrBad,
-            log.Where(l => l[3].StartsWith("FAILED")).GroupBy(l => l[3][8..]).Select(g => (g.Key, g.Count())).OrderByDescending(x => x.Item2).ToList());
+            Count(l => l[3].Contains("calendar (tentative)")), Count(l => l[3] == "exported (encrypted)"), Count(l => l[3].StartsWith("skipped")), failedAll,
+            Count(l => l[5] == "yes"), seconds, File.Exists(nsf) ? new FileInfo(nsf).Length : 0, new FileInfo(pst).Length, addrOk, addrBad, failGroups);
         var outp = new List<string>
         {
             $"{(Rev ? "PST -> NSF" : "NSF -> PST")} summary  {DateTime.Now:yyyy-MM-dd HH:mm}  (numbers only)",
             $"time {seconds:N0}s | NSF size {(File.Exists(nsf) ? new FileInfo(nsf).Length : 0):N0} | PST size {new FileInfo(pst).Length:N0}",
-            $"documents {log.Count} | mails exported {Count(l => l[3].StartsWith("exported"))} | contacts {Count(l => l[3] == "contact" || l[3].StartsWith("group ("))} | calendar entries {Count(l => l[3].StartsWith("appointment"))} | tasks {Count(l => l[3] == "task")} | groups {Count(l => l[3].StartsWith("group ("))} | invitations in calendar {Count(l => l[3].Contains("calendar (tentative)"))} | encrypted ok {Count(l => l[3] == "exported (encrypted)")} | skipped (not mail) {Count(l => l[3].StartsWith("skipped"))} | failed {Count(l => l[3].StartsWith("FAILED"))} (encrypted, no key {Count(l => l[3].Contains("encrypted -"))}) | body rebuilt {Count(l => l[4] == "yes")} | unread {Count(l => l[5] == "yes")}",
+            $"documents {log.Count} | mails exported {Count(l => l[3].StartsWith("exported"))} | contacts {Count(l => l[3] == "contact" || l[3].StartsWith("group ("))} | calendar entries {Count(l => l[3].StartsWith("appointment"))} | tasks {Count(l => l[3] == "task")} | groups {Count(l => l[3].StartsWith("group ("))} | invitations in calendar {Count(l => l[3].Contains("calendar (tentative)"))} | encrypted ok {Count(l => l[3] == "exported (encrypted)")} | skipped (not mail) {Count(l => l[3].StartsWith("skipped"))} | failed {failedAll} (encrypted, no key {Count(l => l[3].Contains("encrypted -"))}) | body rebuilt {Count(l => l[4] == "yes")} | unread {Count(l => l[5] == "yes")}",
         };
         string stats = Path.Combine(workDir, "address_stats.txt");
         if (File.Exists(stats) && File.ReadAllText(stats).Split('\t') is { Length: 3 } st)
@@ -1004,8 +1051,9 @@ internal sealed class MainForm : Form
                          : $"addresses: {st[0]} Notes name(s) -> SMTP | {st[1]} not resolvable ({st[2]} distinct, list in unresolved_names.txt)");
         var forms = log.Where(l => l[3].StartsWith("skipped")).GroupBy(l => l[2]).Select(g => $"{(g.Key == "" ? "(none)" : g.Key)}={g.Count()}").ToList();
         if (forms.Count > 0) outp.Add("skipped forms: " + string.Join(", ", forms));
-        var fails = log.Where(l => l[3].StartsWith("FAILED")).GroupBy(l => l[3][8..]).Select(g => $"{g.Count()} x {g.Key}").ToList();
-        if (fails.Count > 0) outp.Add("failure reasons: " + string.Join(" ; ", fails));
+        // failure reasons are raw error texts (may contain names or paths): left out when the report is meant for sharing
+        if (failGroups.Count > 0) outp.Add(anonymize ? $"failure reasons: {failedAll} item(s), details in the logs of the work folder"
+                                                     : "failure reasons: " + string.Join(" ; ", failGroups.Select(g => $"{g.Item2} x {g.Item1}")));
         outp.Add("");
         outp.Add($"{"folder",-40}{"expected",10}{(Rev ? "in NSF" : "in PST"),10}{"unread",10}{(Rev ? "unreadNSF" : "unreadPST"),10}  check");
         int bad = 0, n = 0;
@@ -1020,8 +1068,12 @@ internal sealed class MainForm : Form
             folderRows.Add((name, e.total, a.total, e.unread, a.unread, ok));
         }
         outp.Add("");
-        outp.Add(bad == 0 ? "RESULT: all folders match" : $"RESULT: {bad} folder(s) do not match");
-        allOk = bad == 0;
+        // complete = every folder matches AND nothing failed (failed items never reach the manifest, so the folder
+        // check alone cannot see them)
+        int failed = report.Failed;
+        outp.Add(bad == 0 && failed == 0 ? "RESULT: complete - all folders match, nothing failed"
+                 : $"RESULT: NOT complete - {bad} folder(s) do not match, {failed} item(s) failed");
+        allOk = bad == 0 && failed == 0;
         return outp;
     }
 
@@ -1070,7 +1122,7 @@ internal sealed class MainForm : Form
         """;
 
     /// <summary>Builds summary.html from the last run (numbers only; folder names follow the "hide folder names" option).</summary>
-    string ReportHtml(bool allOk)
+    string ReportHtml(bool allOk, bool anonymize)
     {
         var s = report!;
         static string E(string x) => System.Net.WebUtility.HtmlEncode(x);
@@ -1080,18 +1132,18 @@ internal sealed class MainForm : Form
         h.Append($"<title>Nsf2Pst · {E(L("轉換報告", "Conversion report"))}</title><style>{ReportCss}</style></head><body><div class=\"wrap\">");
         h.Append("<header><div class=\"logo\"><svg viewBox=\"0 0 24 24\" width=\"24\" height=\"24\" fill=\"none\" stroke=\"#fff\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\">");
         h.Append("<rect x=\"3\" y=\"5.5\" width=\"18\" height=\"13\" rx=\"2.5\"/><path d=\"M4 7.5l8 5.5 8-5.5\"/></svg></div>");
-        h.Append($"<div><div class=\"brand\">Nsf<b>&rarr;</b>Pst</div><div class=\"sub\">{E(L("轉換報告 · 只有數字，可以對外提供", "Conversion report · numbers only, safe to share"))} · {DateTime.Now:yyyy-MM-dd HH:mm}</div></div></header>");
+        h.Append($"<div><div class=\"brand\">Nsf<b>&rarr;</b>Pst</div><div class=\"sub\">{E(anonymize ? L("轉換報告 · 只有數量（資料夾名同錯誤詳情已隱藏）", "Conversion report · counts only (folder names and error details hidden)") : L("轉換報告 · 數量、資料夾名同錯誤原因", "Conversion report · counts, folder names and error reasons"))} · {DateTime.Now:yyyy-MM-dd HH:mm}</div></div></header>");
 
         string took = Duration(TimeSpan.FromSeconds(s.Seconds));
         h.Append($"<section class=\"hero {(allOk ? "ok" : "warn")}\"><div class=\"mark\">{(allOk ? "&#10003;" : "!")}</div><div>");
-        h.Append($"<h1>{E(allOk ? L("所有資料夾數量核對正確", "All folder counts match") : L($"{bad} 個資料夾數量對唔上", $"{bad} folder(s) do not match"))}</h1>");
+        h.Append($"<h1>{E(allOk ? L("全部轉換完成", "Everything was converted") : s.Failed > 0 ? L($"有 {s.Failed:N0} 項未能轉換", $"{s.Failed:N0} item(s) could not be converted") : L($"{bad} 個資料夾數量唔一致", $"{bad} folder(s) do not match"))}</h1>");
         h.Append($"<p>{E(L("用時", "Took"))} {took} · {(Rev ? $"PST {SizeText(s.PstSize)} → NSF {SizeText(s.NsfSize)}" : $"NSF {SizeText(s.NsfSize)} → PST {SizeText(s.PstSize)}")} · {folderRows.Count} {E(L("個資料夾", "folders"))}</p></div></section>");
 
         void Kpi(string label, int v, bool warnWhenNonZero = false) =>
             h.Append($"<div class=\"card kpi{(warnWhenNonZero && v > 0 ? " bad" : "")}\"><div class=\"l\">{E(label)}</div><div class=\"v\">{v:N0}</div></div>");
         h.Append("<section class=\"kpis\">");
         Kpi(L("郵件", "Mail"), s.Mails); Kpi(L("聯絡人", "Contacts"), s.Contacts); Kpi(L("日曆項目", "Calendar"), s.Calendar + s.Invites);
-        Kpi(L("未讀", "Unread"), s.Unread); Kpi(L("加密郵件已解密", "Encrypted, decrypted"), s.Encrypted); Kpi(L("失敗", "Failed"), s.Failed, true);
+        Kpi(L("未讀", "Unread"), s.Unread); if (!Rev) Kpi(L("加密郵件已解密", "Encrypted, decrypted"), s.Encrypted); Kpi(L("失敗", "Failed"), s.Failed, true);
         h.Append("</section>");
 
         // donut: what the documents in the NSF were
@@ -1103,7 +1155,7 @@ internal sealed class MainForm : Form
         int total = Math.Max(1, segs.Sum(x => x.v));
         const double R = 54, C = 2 * Math.PI * R;
         var inv = CultureInfo.InvariantCulture;
-        h.Append("<section class=\"grid2\"><div class=\"card\"><h2>").Append(E(D("文件組成", "What was in the NSF", "PST 內容組成", "What was in the PST"))).Append("</h2><div class=\"donut\">");
+        h.Append("<section class=\"grid2\"><div class=\"card\"><h2>").Append(E(D("NSF 入面有咩", "What was in the NSF", "PST 入面有咩", "What was in the PST"))).Append("</h2><div class=\"donut\">");
         h.Append("<svg viewBox=\"0 0 140 140\" width=\"140\" height=\"140\"><circle cx=\"70\" cy=\"70\" r=\"54\" fill=\"none\" stroke=\"var(--soft)\" stroke-width=\"18\"/>");
         double off = 0;
         foreach (var (_, v, color) in segs.Where(x => x.v > 0))
@@ -1125,7 +1177,7 @@ internal sealed class MainForm : Form
         void Fact(string k, string v) => h.Append($"<span>{E(k)}</span><b>{E(v)}</b>");
         Fact(L("用時", "Time"), took); Fact(L("NSF 大小", "NSF size"), SizeText(s.NsfSize)); Fact(L("PST 大小", "PST size"), SizeText(s.PstSize)); Fact(L("方向", "Direction"), Rev ? "PST → NSF" : "NSF → PST");
         Fact(L("資料夾", "Folders"), folderRows.Count.ToString("N0")); Fact(L("未讀", "Unread"), s.Unread.ToString("N0"));
-        Fact(L("加密郵件已解密", "Encrypted mail decrypted"), s.Encrypted.ToString("N0"));
+        if (!Rev) Fact(L("加密郵件已解密", "Encrypted mail decrypted"), s.Encrypted.ToString("N0"));
         h.Append("</div>");
         if (s.AddrOk + s.AddrBad > 0)
         {
@@ -1151,12 +1203,17 @@ internal sealed class MainForm : Form
         if (s.Fails.Count > 0)
         {
             h.Append($"<section class=\"card\" style=\"margin-top:16px\"><h2>{E(L("失敗原因", "Failure reasons"))}</h2><ul class=\"reasons\">");
-            foreach (var (reason, count) in s.Fails) h.Append($"<li><b>{count:N0}</b> × {E(reason)}</li>");
+            if (anonymize) h.Append($"<li><b>{s.Failed:N0}</b> × {E(L("詳情見 export_log.csv（呢份報告冇列出）", "details in export_log.csv (not listed in this report)"))}</li>");
+            else foreach (var (reason, count) in s.Fails) h.Append($"<li><b>{count:N0}</b> × {E(reason)}</li>");
             h.Append("</ul></section>");
         }
-        h.Append($"<footer>Nsf2Pst · {E(L("此報告只包含數量，不含任何郵件內容。", "This report contains counts only, no mail content."))}</footer></div></body></html>");
+        h.Append($"<footer>Nsf2Pst · {E(anonymize ? L("呢份報告只有數量，冇郵件內容、資料夾名或者錯誤詳情。", "This report has counts only: no mail content, folder names or error details.") : L("呢份報告有數量、資料夾名同錯誤原因，冇郵件內容。", "This report has counts, folder names and error reasons, but no mail content."))}</footer></div></body></html>");
         return h.ToString();
     }
+
+    // a row failed completely ("FAILED: reason") or partly (an entry was made but e.g. its attachments failed: "... FAILED ...")
+    static bool IsFail(string[] l) => l[3].Contains("FAILED");
+    static string FailReason(string[] l) => l[3].StartsWith("FAILED: ") ? l[3][8..] : l[3];
 
     /// <summary>export_log.csv rows as string arrays (NoteID, UNID, Form, Status, BodyRebuilt, Unread, Folders, Subject).</summary>
     List<string[]> ReadLog()
@@ -1186,7 +1243,9 @@ internal sealed class MainForm : Form
     static class Prefs
     {
         public static string Lang = "", Theme = "";
-        static string FilePath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Nsf2Pst", "settings.txt");
+        // NSF2PST_SETTINGS (tests only): another settings file, so automated runs never touch the user's own choice
+        static string FilePath => Environment.GetEnvironmentVariable("NSF2PST_SETTINGS") is { Length: > 0 } t ? t
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Nsf2Pst", "settings.txt");
         public static void Load()
         {
             try
@@ -1212,36 +1271,40 @@ internal sealed class MainForm : Form
     {
         public static bool Dark;
         public static Color Back, Surface, Line, Text, Muted, Accent, AccentDark, AccentSoft, AccentLine, Accent2, DashLine;
-        public static Color Ok, OkSoft, Warn, WarnSoft, Bad, BadSoft, LogBack, LogText, Disabled, DisabledText;
+        public static Color Ok, OkSoft, Warn, WarnSoft, Bad, BadSoft, LogBack, LogText, Disabled, DisabledText, OnAccent;
         static Color C(int r, int g, int b) => Color.FromArgb(r, g, b);
+        // every text colour is >= 4.5:1 on the surfaces it is drawn on (Back, Surface and the matching *Soft tint)
         public static void Apply(bool dark)
         {
             Dark = dark;
             if (!dark)
             {
-                Back = C(245, 246, 250); Surface = Color.White; Line = C(228, 230, 238); Text = C(28, 31, 42); Muted = C(107, 114, 128);
+                Back = C(245, 246, 250); Surface = Color.White; Line = C(228, 230, 238); Text = C(28, 31, 42); Muted = C(95, 102, 117);
                 Accent = C(91, 91, 214); AccentDark = C(70, 70, 190); AccentSoft = C(238, 238, 252); AccentLine = C(190, 190, 236); Accent2 = C(124, 92, 246); DashLine = C(178, 180, 230);
-                Ok = C(18, 150, 84); OkSoft = C(234, 248, 240); Warn = C(214, 140, 8); WarnSoft = C(254, 246, 230); Bad = C(214, 52, 52); BadSoft = C(253, 236, 236);
-                Disabled = C(200, 202, 222); DisabledText = Color.White;
+                Ok = C(11, 122, 67); OkSoft = C(234, 248, 240); Warn = C(161, 92, 0); WarnSoft = C(254, 246, 230); Bad = C(180, 35, 35); BadSoft = C(253, 236, 236);
+                Disabled = C(228, 230, 238); DisabledText = C(95, 102, 117); OnAccent = Color.White;
             }
             else
             {
                 Back = C(19, 20, 26); Surface = C(29, 31, 40); Line = C(50, 53, 66); Text = C(234, 236, 242); Muted = C(150, 156, 172);
-                Accent = C(132, 128, 255); AccentDark = C(112, 108, 240); AccentSoft = C(45, 44, 80); AccentLine = C(96, 94, 170); Accent2 = C(160, 120, 255); DashLine = C(88, 88, 150);
+                Accent = C(132, 128, 255); AccentDark = C(150, 146, 255); AccentSoft = C(45, 44, 80); AccentLine = C(96, 94, 170); Accent2 = C(160, 120, 255); DashLine = C(88, 88, 150);
                 Ok = C(64, 200, 128); OkSoft = C(24, 46, 36); Warn = C(240, 176, 52); WarnSoft = C(52, 42, 22); Bad = C(242, 96, 96); BadSoft = C(60, 30, 34);
-                Disabled = C(56, 58, 82); DisabledText = C(140, 142, 170);
+                Disabled = C(56, 58, 82); DisabledText = C(176, 179, 202); OnAccent = C(19, 20, 26);
             }
             LogBack = C(14, 15, 20); LogText = C(206, 212, 224);
         }
+        // type scale: 9 (captions), 10 (body), 13 (titles), 17 (page heading); numbers in the display face
+        public const float Small = 9f, Body = 10f, Title = 13f, Heading = 17f;
         public static Font Ui(float size, FontStyle style = FontStyle.Regular) => new(En ? "Segoe UI" : "Microsoft JhengHei UI", size, style);
-        public static Font Num(float size) => new(FontFamily.Families.Any(f => f.Name == "Segoe UI Variable Display") ? "Segoe UI Variable Display" : "Segoe UI", size, FontStyle.Bold);
+        static readonly string numFamily = FontFamily.Families.Any(f => f.Name == "Segoe UI Variable Display") ? "Segoe UI Variable Display" : "Segoe UI";
+        public static Font Num(float size) => new(numFamily, size, FontStyle.Bold);
     }
 
     /// <summary>Glyphs of the Windows icon font (Segoe Fluent Icons on Windows 11, Segoe MDL2 Assets on Windows 10).</summary>
     static class Ico
     {
         public const string Mail = "\uE715", Upload = "\uE898", Settings = "\uE713", ChevronDown = "\uE70D", ChevronUp = "\uE70E", Forward = "\uE72A",
-            Stop = "\uE71A", Folder = "\uE8B7", Document = "\uE8A5", List = "\uE8FD", Refresh = "\uE72C", Contact = "\uE77B", Calendar = "\uE787",
+            Stop = "\uE71A", Folder = "\uE8B7", Document = "\uE8A5", Refresh = "\uE72C", Contact = "\uE77B", Calendar = "\uE787",
             Unread = "\uE715", Warning = "\uE7BA", Completed = "\uE930", ErrorBadge = "\uEA39", CheckMark = "\uE73E", Cancel = "\uE711",
             Globe = "\uE774", Moon = "\uE708", Sun = "\uE706", Chart = "\uE9D2";
         static readonly string family = FontFamily.Families.Any(f => f.Name == "Segoe Fluent Icons") ? "Segoe Fluent Icons" : "Segoe MDL2 Assets";
@@ -1262,7 +1325,7 @@ internal sealed class MainForm : Form
     /// <summary>Rounded card with a hairline border (dashed for the drop zone, accent while a file is dragged over it).</summary>
     sealed class Card : Panel
     {
-        public int Radius = 12;
+        public int Radius = 10;
         public bool Dashed, Highlight;
         public Color Fill = Th.Surface, Border = Th.Line;
         public Card() { DoubleBuffered = true; ResizeRedraw = true; BackColor = Th.Surface; SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true); }
@@ -1283,11 +1346,22 @@ internal sealed class MainForm : Form
         }
     }
 
+    /// <summary>The keyboard focus indicator of the custom-drawn controls: a 2 px accent ring just inside the edge.</summary>
+    static void FocusRing(Graphics g, RectangleF r, float radius, Color? color = null)
+    {
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        var inner = RectangleF.Inflate(r, -S(2), -S(2));
+        using var path = Round(inner, Math.Max(0, radius - S(2)));
+        using var pen = new Pen(color ?? Th.Accent, S(2));
+        g.DrawPath(pen, path);
+    }
+
     /// <summary>Rounded button: filled accent (primary) or outline (secondary); text, icon or both.</summary>
     sealed class Pill : Button
     {
         readonly bool primary, small, iconAfter;
         readonly string? icon;
+        Font? iconFont;
         bool hover, down;
         public Pill(string text, bool primary = false, bool small = false, string? icon = null, bool iconAfter = false)
         {
@@ -1295,7 +1369,7 @@ internal sealed class MainForm : Form
             Text = text;
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
             FlatStyle = FlatStyle.Flat; FlatAppearance.BorderSize = 0; Cursor = Cursors.Hand;
-            Font = Th.Ui(small ? 9.25f : 10f, primary ? FontStyle.Bold : FontStyle.Regular);
+            Font = Th.Ui(small ? Th.Small : Th.Body, primary ? FontStyle.Bold : FontStyle.Regular);
             Fit();
         }
         /// <summary>Size from the text; called again once the window knows its DPI.</summary>
@@ -1310,20 +1384,26 @@ internal sealed class MainForm : Form
         protected override void OnMouseDown(MouseEventArgs e) { down = true; Invalidate(); base.OnMouseDown(e); }
         protected override void OnMouseUp(MouseEventArgs e) { down = false; Invalidate(); base.OnMouseUp(e); }
         protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
+        protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+        protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
         protected override void OnPaint(PaintEventArgs e)
         {
-            var g = e.Graphics;
+            Draw(e.Graphics);
+            if (Focused && ShowFocusCues && Enabled) FocusRing(e.Graphics, new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f), S(10), primary ? Th.OnAccent : Th.Accent);
+        }
+        void Draw(Graphics g)
+        {
             g.Clear(Parent?.BackColor ?? Th.Back);
             g.SmoothingMode = SmoothingMode.AntiAlias;
             var r = new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f);
-            using var path = Round(r, S(small ? 8 : 10));
+            using var path = Round(r, S(10));
             Color fill = !Enabled ? (primary ? Th.Disabled : Th.Back) : primary ? (down || hover ? Th.AccentDark : Th.Accent) : (down ? Th.Line : hover ? Th.AccentSoft : Th.Surface);
             using (var b = new SolidBrush(fill)) g.FillPath(b, path);
             if (!primary) { using var pen = new Pen(Enabled && hover ? Th.AccentLine : Th.Line); g.DrawPath(pen, path); }
-            Color fg = primary ? (Enabled ? Color.White : Th.DisabledText) : Enabled ? Th.Text : Th.Muted;
+            Color fg = primary ? (Enabled ? Th.OnAccent : Th.DisabledText) : Enabled ? Th.Text : Th.Muted;
             var tsize = TextRenderer.MeasureText(g, Text, Font, Size.Empty, TextFormatFlags.NoPadding);
             if (icon == null) { TextRenderer.DrawText(g, Text, Font, ClientRectangle, fg, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding); return; }
-            using var iconFont = Ico.Font(Font.Size * 0.95f);
+            var iconFont = this.iconFont ??= Ico.Font(Font.Size * 0.95f);   // created once, not on every repaint
             if (Text.Length == 0) { TextRenderer.DrawText(g, icon, iconFont, ClientRectangle, fg, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding); return; }
             var isize = TextRenderer.MeasureText(g, icon, iconFont, Size.Empty, TextFormatFlags.NoPadding);
             int gap = S(8), total = isize.Width + gap + tsize.Width, x = (Width - total) / 2;
@@ -1338,6 +1418,58 @@ internal sealed class MainForm : Form
                 TextRenderer.DrawText(g, icon, iconFont, new Point(x, iy), fg, TextFormatFlags.NoPadding);
                 TextRenderer.DrawText(g, Text, Font, new Point(x + isize.Width + gap, ty), fg, TextFormatFlags.NoPadding);
             }
+        }
+    }
+
+    /// <summary>
+    /// The "Advanced settings" header: one real button (Tab, Enter / Space, UI Automation Invoke) drawn as a card with a
+    /// gear, the title, a summary of what is filled in and a chevron.
+    /// </summary>
+    sealed class Expander : Button
+    {
+        string summary = "";
+        bool open, summarySet, hover;
+        Font? icons, small, chev;   // made on the first paint, kept
+        public string Summary { get => summary; set { summary = value; Invalidate(); } }
+        public bool SummarySet { get => summarySet; set { summarySet = value; Invalidate(); } }
+        public bool Open { get => open; set { open = value; AccessibleDescription = value ? L("已展開", "Expanded") : L("已收起", "Collapsed"); Invalidate(); } }
+        public Expander()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            FlatStyle = FlatStyle.Flat; FlatAppearance.BorderSize = 0; Cursor = Cursors.Hand; Font = Th.Ui(Th.Title, FontStyle.Bold);
+            Open = false;
+        }
+        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+        protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.Clear(Parent?.BackColor ?? Th.Back);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            var r = new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f);
+            using (var path = Round(r, S(10)))
+            {
+                using (var b = new SolidBrush(hover ? Th.AccentSoft : Th.Surface)) g.FillPath(b, path);
+                using var pen = new Pen(hover ? Th.AccentLine : Th.Line); g.DrawPath(pen, path);
+            }
+            var icons = this.icons ??= Ico.Font(Th.Title);
+            var small = this.small ??= Th.Ui(Th.Body);
+            var flags = TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine;
+            int x = S(16);
+            var gs = TextRenderer.MeasureText(g, Ico.Settings, icons, Size.Empty, TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, Ico.Settings, icons, new Rectangle(x, 0, gs.Width, Height), Th.Muted, flags);
+            x += gs.Width + S(12);
+            var ts = TextRenderer.MeasureText(g, Text, Font, Size.Empty, TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(g, Text, Font, new Rectangle(x, 0, ts.Width, Height), Th.Text, flags);
+            var chev = this.chev ??= Ico.Font(Th.Body);
+            int cx = Width - S(16) - S(16);
+            TextRenderer.DrawText(g, open ? Ico.ChevronUp : Ico.ChevronDown, chev, new Rectangle(cx, 0, S(16), Height), Th.Muted, flags | TextFormatFlags.HorizontalCenter);
+            int sx = x + ts.Width + S(16), sw = cx - S(12) - sx;
+            if (sw > S(40))
+                TextRenderer.DrawText(g, summary, small, new Rectangle(sx, 0, sw, Height), summarySet ? Th.Accent : Th.Muted, flags | TextFormatFlags.Right | TextFormatFlags.EndEllipsis);
+            if (Focused && ShowFocusCues) FocusRing(g, r, S(10));
         }
     }
 
@@ -1368,7 +1500,7 @@ internal sealed class MainForm : Form
             var g = e.Graphics;
             g.Clear(Parent?.BackColor ?? Th.Back);
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            using var path = Round(new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f), S(12));
+            using var path = Round(new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f), S(10));
             using (var b = new SolidBrush(Th.Surface)) g.FillPath(b, path);
             using var pen = new Pen(Th.Line); g.DrawPath(pen, path);
         }
@@ -1380,9 +1512,22 @@ internal sealed class MainForm : Form
             {
                 this.owner = owner; this.i = i; Text = text;
                 SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-                FlatStyle = FlatStyle.Flat; FlatAppearance.BorderSize = 0; Cursor = Cursors.Hand; Font = Th.Ui(10f, FontStyle.Bold);
+                FlatStyle = FlatStyle.Flat; FlatAppearance.BorderSize = 0; Cursor = Cursors.Hand; Font = Th.Ui(Th.Body, FontStyle.Bold);
             }
             protected override void OnClick(EventArgs e) { owner.Select(i); base.OnClick(e); }
+            // arrow keys move between the options, like a radio group
+            protected override bool IsInputKey(Keys k) => k is Keys.Left or Keys.Right || base.IsInputKey(k);
+            protected override void OnKeyDown(KeyEventArgs e)
+            {
+                if (e.KeyCode is Keys.Left or Keys.Right)
+                {
+                    int j = Math.Clamp(i + (e.KeyCode == Keys.Right ? 1 : -1), 0, owner.segs.Length - 1);
+                    owner.Select(j); owner.segs[j].Focus(); e.Handled = true;
+                }
+                base.OnKeyDown(e);
+            }
+            protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+            protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
             protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
             protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
             protected override void OnPaint(PaintEventArgs e)
@@ -1393,13 +1538,14 @@ internal sealed class MainForm : Form
                 bool on = owner.Index == i;
                 if (on || hover)
                 {
-                    using var path = Round(new RectangleF(0, 0, Width - 1, Height - 1), S(9));
+                    using var path = Round(new RectangleF(0, 0, Width - 1, Height - 1), S(8));
                     using var b = on ? (Brush)new LinearGradientBrush(new RectangleF(0, 0, Width, Height), Th.Accent2, Th.Accent, LinearGradientMode.Horizontal)
                                      : new SolidBrush(Th.AccentSoft);
                     g.FillPath(b, path);
                 }
-                Color fg = on ? Color.White : owner.Enabled ? Th.Text : Th.Muted;
+                Color fg = on ? Th.OnAccent : owner.Enabled ? Th.Text : Th.Muted;
                 TextRenderer.DrawText(g, Text, Font, ClientRectangle, fg, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                if (Focused && ShowFocusCues) FocusRing(g, new RectangleF(0, 0, Width - 1, Height - 1), S(8), on ? Th.OnAccent : Th.Accent);
             }
         }
     }
@@ -1430,6 +1576,7 @@ internal sealed class MainForm : Form
     sealed class Stepper : Control
     {
         int current;
+        Font? numFont, lblFont, lblBold, icon;   // made on the first paint, kept
         public int Current { get => current; set { current = value; Invalidate(); } }
         public Stepper() { SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true); }
         protected override void OnPaint(PaintEventArgs e)
@@ -1441,10 +1588,10 @@ internal sealed class MainForm : Form
                                  : new[] { L("匯出郵件", "Export mail"), L("寫入 PST", "Write PST"), L("核對結果", "Verify") };
             int n = names.Length, d = S(28), top = S(4);
             float slot = (Width - 1f) / n;
-            using var numFont = Th.Ui(10f, FontStyle.Bold);
-            using var lblFont = Th.Ui(9.5f);
-            using var lblBold = Th.Ui(9.5f, FontStyle.Bold);
-            using var icon = Ico.Font(10f);
+            var numFont = this.numFont ??= Th.Ui(Th.Body, FontStyle.Bold);
+            var lblFont = this.lblFont ??= Th.Ui(Th.Body);
+            var lblBold = this.lblBold ??= Th.Ui(Th.Body, FontStyle.Bold);
+            var icon = this.icon ??= Ico.Font(10f);
             for (int i = 0; i < n; i++)
             {
                 float cx = slot * i + slot / 2;
@@ -1459,8 +1606,8 @@ internal sealed class MainForm : Form
                 if (!done && !active) { using var pen = new Pen(Th.Line, S(2)); g.DrawEllipse(pen, c); }
                 if (active) { using var halo = new Pen(Color.FromArgb(60, Th.Accent), S(4)); g.DrawEllipse(halo, RectangleF.Inflate(c, S(3), S(3))); }
                 var cr = Rectangle.Round(c);
-                if (done) TextRenderer.DrawText(g, Ico.CheckMark, icon, cr, Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-                else TextRenderer.DrawText(g, (i + 1).ToString(), numFont, cr, active ? Color.White : Th.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                if (done) TextRenderer.DrawText(g, Ico.CheckMark, icon, cr, Th.OnAccent, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                else TextRenderer.DrawText(g, (i + 1).ToString(), numFont, cr, active ? Th.OnAccent : Th.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
                 var lr = new Rectangle((int)(cx - slot / 2), top + d + S(8), (int)slot, S(22));
                 TextRenderer.DrawText(g, names[i], active ? lblBold : lblFont, lr, active || done ? Th.Text : Th.Muted, TextFormatFlags.HorizontalCenter);
             }
@@ -1576,6 +1723,15 @@ internal sealed class MainForm : Form
         [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
         [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)] static extern int SetWindowTheme(IntPtr hwnd, string? app, string? idList);
         [DllImport("user32.dll")] static extern bool FlashWindowEx(ref FLASHWINFO info);
+        [DllImport("user32.dll")] static extern IntPtr MonitorFromPoint(Point pt, uint flags);
+        [DllImport("shcore.dll")] static extern int GetDpiForMonitor(IntPtr monitor, int type, out uint dpiX, out uint dpiY);
+
+        /// <summary>Effective DPI of the screen that contains the point (96 if unknown).</summary>
+        public static int MonitorDpi(Point p)
+        {
+            try { return GetDpiForMonitor(MonitorFromPoint(p, 2), 0, out uint x, out _) == 0 && x > 0 ? (int)x : 96; }   // MONITOR_DEFAULTTONEAREST, MDT_EFFECTIVE_DPI
+            catch { return 96; }
+        }
         [StructLayout(LayoutKind.Sequential)] struct FLASHWINFO { public uint cbSize; public IntPtr hwnd; public uint dwFlags; public uint uCount; public uint dwTimeout; }
 
         static int Rgb(Color c) => c.R | c.G << 8 | c.B << 16;
@@ -1593,7 +1749,7 @@ internal sealed class MainForm : Form
             catch { }
         }
 
-        public static void DarkScrollbars(IntPtr hwnd, bool dark) { try { SetWindowTheme(hwnd, dark ? "DarkMode_Explorer" : null, null); } catch { } }
+        public static void DarkScrollbars(IntPtr hwnd) { try { SetWindowTheme(hwnd, "DarkMode_Explorer", null); } catch { } }
 
         public static bool SystemUsesDarkTheme()
         {

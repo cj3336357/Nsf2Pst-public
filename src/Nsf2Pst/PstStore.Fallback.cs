@@ -17,6 +17,18 @@ internal sealed partial class PstStore
     const uint PR_ATTACH_DATA_BIN = 0x37010102, PR_ATTACH_MIME_TAG = 0x370E001F, PR_ATTACH_CONTENT_ID = 0x3712001F, PR_ATTACH_NUM = 0x0E210003;
     static readonly Guid IID_IStream = new("0000000C-0000-0000-C000-000000000046");
 
+    /// <summary>Rewrites an EML through a temporary file: an error while writing leaves the original EML intact.</summary>
+    static void ReplaceEml(string eml, MimeKit.MimeMessage mime)
+    {
+        string tmp = eml + ".tmp";
+        try
+        {
+            using (var fs = File.Create(tmp)) mime.WriteTo(fs);
+            File.Move(tmp, eml, true);
+        }
+        finally { if (File.Exists(tmp)) File.Delete(tmp); }
+    }
+
     /// <summary>Writes the message as EML from its properties. Returns the number of attachments that could not be read.</summary>
     int WriteMimeFromProps(IMessage msg, string cls, string eml, int htmlCodePage = 0)
     {
@@ -164,7 +176,7 @@ internal sealed partial class PstStore
             }
         }
         finally { Marshal.FreeHGlobal(piid); }
-        if (replaced > 0) using (var fs = File.Create(eml)) outer.WriteTo(fs);
+        if (replaced > 0) ReplaceEml(eml, outer);
         return replaced;
     }
 

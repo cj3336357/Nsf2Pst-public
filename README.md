@@ -56,20 +56,23 @@ Start `Nsf2Pst.exe` without arguments. Drop an `.nsf` file on the window or pres
 1. **NSF file**: the mail file. **Work on a copy**; Notes updates view indexes inside the file it opens.
 2. **Output PST**: a new file (an existing PST is never appended to).
 3. Optional settings:
-   - **Domino server**: if the NSF is opened from a server.
-   - **Domino directory**: `server!!names.nsf` or a copy of `names.nsf`, used to resolve Notes names that the mail file
-     does not reveal.
-   - **Read/unread user**: leave empty to use the mailbox owner.
+   - **Mail server (Domino)**: if the NSF is opened from a server.
+   - **Company directory (names.nsf)**: `server!!names.nsf` or a copy of `names.nsf`, used to resolve Notes names that
+     the mail file does not reveal.
+   - **Whose read marks to use**: leave empty to use the mailbox owner.
    - **Owner Notes ID** + **password**: only needed for encrypted mail.
-   - **Hide folder names in summary**: for sharing `summary.txt`.
-4. Press **Start** (or Enter). The window shows the three steps (export, write PST, verify), the percentage and an
-   estimate of the remaining time; the taskbar button shows the progress too. At the end it shows the counts and a
-   per-folder check. The work folder `<pst name>_work` next to the PST holds the per-document log
+   - **Leave folder names and error details out of the report**: for passing the summary on to others.
+4. Press **Start** (or Enter; Esc stops a running conversion). The window shows the three steps (export, write PST,
+   verify), the percentage and an estimate of the remaining time; the taskbar button shows the progress too. At the end
+   it answers one question first: was everything converted? It shows green only when every folder count matches **and**
+   no item failed; otherwise it says how many items could not be converted, with the most frequent reasons, and marks
+   the folders that do not match. Below are the counts and the per-folder check. The work folder `<pst name>_work` next to the PST holds the per-document log
    (`export_log.csv`), `summary.txt`, the visual report `summary.html` and `unresolved_names.txt`.
 
    `summary.html` is a single self-contained page (no scripts, no external files, light / dark) with the same numbers
    as `summary.txt`: totals, what the NSF contained, address resolution and a NSF-vs-PST bar per folder. Like
-   `summary.txt` it contains no mail content, and folder names are hidden when that option is on.
+   `summary.txt` it contains no mail content. It does contain folder names and the failure reasons (raw error texts,
+   which can include names or paths) unless the option above is on; then it has counts only.
 
    <img src="docs/report.png" alt="Visual report summary.html" width="560">
 

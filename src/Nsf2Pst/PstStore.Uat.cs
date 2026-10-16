@@ -71,6 +71,52 @@ internal sealed partial class PstStore
         return b.ToArray();
     }
 
+    /// <summary>
+    /// Weekly-on-Wednesday pattern with several moved occurrences, each with its own OverrideFlags. writer2 0x3009 adds the
+    /// ExtendedException (Unicode subjects); an older writer (0x3008) has only the ANSI subject, in the system code page.
+    /// </summary>
+    static byte[] RecurBlobExceptions(DateTime first, uint count, int startMin, int endMin, uint writer2,
+                                      params (DateTime originalDay, DateTime newStart, ushort flags, string subject)[] ex)
+    {
+        static uint Min(DateTime d) => (uint)(d - new DateTime(1601, 1, 1)).TotalMinutes;
+        var ansiEnc = Recurrence.Ansi;
+        var b = new List<byte>();
+        void W16(int v) => b.AddRange(BitConverter.GetBytes((ushort)v));
+        void W32(long v) => b.AddRange(BitConverter.GetBytes((uint)v));
+        DateTime last = first.AddDays(7 * (count - 1));
+        W16(0x3004); W16(0x3004); W16(0x200B); W16(0x1); W16(0);
+        W32(0); W32(1); W32(0); W32(0x08);                               // every week, Wednesday
+        W32(0x2022); W32(count); W32(0);
+        W32(ex.Length); foreach (var e in ex) W32(Min(e.originalDay));   // deleted (= modified) instances
+        W32(ex.Length); foreach (var e in ex) W32(Min(e.newStart.Date)); // modified instance dates
+        W32(Min(first)); W32(Min(last));
+        W32(0x3006); W32(writer2); W32(startMin); W32(endMin);
+        W16(ex.Length);
+        foreach (var e in ex)
+        {
+            W32(Min(e.newStart)); W32(Min(e.newStart.AddMinutes(endMin - startMin))); W32(Min(e.originalDay) + startMin);
+            W16(e.flags);
+            if ((e.flags & 0x0001) != 0) { byte[] a = ansiEnc.GetBytes(e.subject); W16(a.Length + 1); W16(a.Length); b.AddRange(a); }
+            if ((e.flags & 0x0100) != 0) W32(3);                          // AppointmentColor
+            // 0x0200 (changed body) has no field in ExceptionInfo
+        }
+        W32(0);                                                           // ReservedBlock1Size
+        if (writer2 >= 0x3009)
+            foreach (var e in ex)
+            {
+                W32(4); W32(0);                                           // ChangeHighlight
+                W32(0);                                                   // ReservedBlockEE1Size
+                if ((e.flags & 0x0011) != 0)
+                {
+                    W32(Min(e.newStart)); W32(Min(e.newStart.AddMinutes(endMin - startMin))); W32(Min(e.originalDay) + startMin);
+                    if ((e.flags & 0x0001) != 0) { W16(e.subject.Length); b.AddRange(System.Text.Encoding.Unicode.GetBytes(e.subject)); }
+                    W32(0);                                               // ReservedBlockEE2Size
+                }
+            }
+        W32(0);                                                           // ReservedBlock2Size
+        return b.ToArray();
+    }
+
     public void MakeUatItems()
     {
         var local = TimeSpan.FromHours(8);
@@ -135,6 +181,17 @@ internal sealed partial class PstStore
         Repeating("UAT R9 每週三 (一次改咗)", At(2024, 6, 5, 15, 0), At(2024, 6, 5, 16, 0), 2,
             RecurBlobWithException(new(2024, 6, 5), 4, 900, 960, new DateTime(2024, 6, 12), new DateTime(2024, 6, 13, 16, 0, 0), "UAT R9 改期：星期四"),
             "應該係 6/5 6/13(改期) 6/19 6/26");
+        // R10 two moved occurrences; the first also has a changed body (flag 0x0200, which has no field in ExceptionInfo)
+        Repeating("UAT R10 每週三 (兩次改咗)", At(2024, 9, 4, 10, 0), At(2024, 9, 4, 11, 0), 2,
+            RecurBlobExceptions(new(2024, 9, 4), 4, 600, 660, 0x3009,
+                (new DateTime(2024, 9, 11), new DateTime(2024, 9, 12, 14, 0, 0), 0x0201, "UAT R10 改期一：星期四"),
+                (new DateTime(2024, 9, 18), new DateTime(2024, 9, 20, 9, 0, 0), 0x0001, "UAT R10 改期二：星期五")),
+            "應該係 9/4 9/12 14:00(改期一) 9/20 09:00(改期二) 9/25");
+        // R11 an older Outlook (writer 0x3008): the changed subject exists only as ANSI text in the system code page
+        Repeating("UAT R11 舊版 Outlook", At(2024, 10, 2, 10, 0), At(2024, 10, 2, 11, 0), 2,
+            RecurBlobExceptions(new(2024, 10, 2), 3, 600, 660, 0x3008,
+                (new DateTime(2024, 10, 9), new DateTime(2024, 10, 10, 15, 0, 0), 0x0001, "R11 改期中文")),
+            "應該係 10/2 10/10 15:00(改期中文) 10/16");
 
         // private appointment, multi-day all-day event
         var priv = Appt("UAT 私人約會：睇醫生", At(2024, 5, 7, 11, 0), At(2024, 5, 7, 12, 0), false, "診所", "私人");
