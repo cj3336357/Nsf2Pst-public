@@ -803,6 +803,7 @@ internal sealed class MainForm : Form
     bool FinishSummary(string nsf, string pst, List<string> counts)
     {
         // the counts output may contain Notes console messages; only "folder TAB items TAB unread" lines count
+        Trace("summary start");
         var summary = BuildSummary(nsf, pst, counts.Where(c => c.Contains('\t')).ToList(), (DateTime.Now - runStart).TotalSeconds, chkAnon.Checked, out bool allOk);
         File.WriteAllLines(Path.Combine(workDir, "summary.txt"), summary, new UTF8Encoding(true));
         try { File.WriteAllText(Path.Combine(workDir, "summary.html"), ReportHtml(allOk, chkAnon.Checked), new UTF8Encoding(false)); } catch (Exception ex) { Log("summary.html: " + ex.Message); }
@@ -811,7 +812,9 @@ internal sealed class MainForm : Form
         UpdateTiles(summary);
         Log("");
         Log(L("摘要檔：", "Summary files: ") + Path.Combine(workDir, "summary.txt") + " / summary.html");
+        Trace("summary written");
         progress.Value = 1000;
+        Trace("progress 1000 set");
         stepper.Current = 3;
         if (allOk) SetStatus(L("完成：每個資料夾數量一致，冇失敗項目。", "Done: every folder matches, nothing failed."), Tone.Ok);
         else SetStatus(L("完成，但有項目未轉換或者數量唔一致。", "Done, but some items were not converted or counts do not match."), Tone.Warn);
@@ -820,6 +823,7 @@ internal sealed class MainForm : Form
 
     void ShowDone(bool finished, bool allOk, bool stopped, string failText, string pst, string? incomplete = null)
     {
+        Trace("ShowDone start");
         Color tint;
         if (finished)
         {
@@ -875,11 +879,14 @@ internal sealed class MainForm : Form
         btnOpenOut.Enabled = finished && File.Exists(pst);   // an NSF created on a server has no local file to show
         btnOpenLog.Visible = File.Exists(Path.Combine(workDir, "export_log.csv"));
         ShowView(viewDone);
+        Trace("done view shown");
         if (!finished && !logPanel.Visible) ToggleLog();
 
         // taskbar: full green bar on success, red / yellow otherwise; flash the button if the window is in the background
         if (finished && allOk) Taskbar.Clear(Handle); else Taskbar.Set(Handle, 1000, 1000, finished || stopped ? Taskbar.Paused : Taskbar.Error);
+        Trace("ShowDone taskbar set");
         if (Form.ActiveForm != this) Native.Flash(Handle);
+        Trace("ShowDone end");
     }
 
     /// <summary>Runs this exe with the given arguments, streams its output to the log and maps PROGRESS lines to the bar.</summary>
@@ -933,10 +940,13 @@ internal sealed class MainForm : Form
         p.ErrorDataReceived += (_, e) => OnLine(e.Data);
         p.Exited += (_, _) =>
         {
+            Trace($"child {args[0]} exited");
             p.WaitForExit();   // all output read
-            BeginInvoke(() => { pump.Dispose(); ShowProgress(); child = null; int rc = p.ExitCode; p.Dispose(); tcs.TrySetResult(rc); });
+            Trace($"child {args[0]} output closed");
+            BeginInvoke(() => { Trace($"child {args[0]} done on UI"); pump.Dispose(); ShowProgress(); child = null; int rc = p.ExitCode; p.Dispose(); tcs.TrySetResult(rc); });
         };
         child = p;
+        Trace($"child {args[0]} start");
         p.Start();
         p.BeginOutputReadLine();
         p.BeginErrorReadLine();
@@ -965,6 +975,14 @@ internal sealed class MainForm : Form
     }
 
     void Log(string s) { txtLog.AppendText(s + Environment.NewLine); }
+
+    // NSF2PST_TRACE (tests only): timestamps of the run steps, to find where the window waits
+    static readonly string? tracePath = Environment.GetEnvironmentVariable("NSF2PST_TRACE");
+    static void Trace(string what)
+    {
+        if (tracePath == null) return;
+        try { File.AppendAllText(tracePath, $"{DateTime.Now:HH:mm:ss.fff} [{Environment.CurrentManagedThreadId}] {what}{Environment.NewLine}"); } catch { }
+    }
 
     static void OpenFile(string path) { if (File.Exists(path)) Process.Start(new ProcessStartInfo(path) { UseShellExecute = true }); }
 
