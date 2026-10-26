@@ -66,7 +66,8 @@ internal static class NotesApi
         string? ini = NotesIni();
         if (ini == null) throw new FileNotFoundException("notes.ini not found");
         RestoreNotesIni();                       // a backup left by an interrupted run
-        File.Copy(ini, ini + ".nsf2pst.bak", true);
+        Directory.CreateDirectory(Path.GetDirectoryName(IniBackup)!);
+        File.Copy(ini, IniBackup, true);
         Check(NotesInitExtended(2, new[] { Path.GetDirectoryName(ini)!, "=" + ini }), "NotesInitExtended");
         var name = new byte[256];
         Check(SECKFMSwitchToIDFile(Lmbcs(idFile), Lmbcs(password), name, (ushort)(name.Length - 1), 0, IntPtr.Zero), "SECKFMSwitchToIDFile");
@@ -80,10 +81,19 @@ internal static class NotesApi
     public static void RestoreNotesIni()
     {
         string? ini = NotesIni();
-        if (ini == null || !File.Exists(ini + ".nsf2pst.bak")) return;
-        File.Copy(ini + ".nsf2pst.bak", ini, true);
-        File.Delete(ini + ".nsf2pst.bak");
+        if (ini == null) return;
+        // older versions kept the backup next to notes.ini, which a standard user cannot create under Program Files
+        foreach (string bak in new[] { IniBackup, ini + ".nsf2pst.bak" })
+        {
+            if (!File.Exists(bak)) continue;
+            File.Copy(bak, ini, true);
+            File.Delete(bak);
+        }
     }
+
+    /// <summary>Backup of notes.ini in the user's profile: the Notes program folder is often read-only for standard users
+    /// (notes.ini itself is writable).</summary>
+    static string IniBackup => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Nsf2Pst", "notes.ini.nsf2pst.bak");
 
     /// <summary>Folder of nnotes.dll: the Notes program folder registered for the Notes COM classes.</summary>
     public static IEnumerable<string> ProgramDirs()

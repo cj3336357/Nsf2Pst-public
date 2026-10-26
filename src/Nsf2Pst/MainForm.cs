@@ -51,7 +51,12 @@ internal sealed class MainForm : Form
 
     /// <summary>The reason of a failed step in the UI language (known causes), else the child's own text.</summary>
     static string FriendlyFatal(string f) =>
-        f.Contains("in use by another program") ? L("PST 檔被其他程式使用緊（例如 Outlook），請先關閉 Outlook 或者用 PST 嘅副本。", "The PST is in use by another program (e.g. Outlook). Close Outlook or use a copy of the PST.")
+        f.Contains("Notes asked for a password") ? L("Notes 要密碼：請喺「進階設定」填 Notes 密碼，或者先開 Notes 登入，並喺 User Security 剔「Don't prompt for a password from other Notes-based programs」。",
+            "Notes asked for a password: enter the Notes password in the advanced settings, or log in to Notes first and tick \"Don't prompt for a password from other Notes-based programs\" in User Security.")
+        : f.Contains("ID file is locked by another process") ? L("Notes ID 被另一個程式鎖住：睇吓 Notes／Domino Administrator 係咪喺度問緊密碼（輸入密碼或者閂咗佢），或者喺工作管理員結束多出嚟嘅 Nsf2Pst.exe，再試一次。",
+            "The Notes ID is locked by another program. Check whether Notes or Domino Administrator is asking for a password (enter it or close it), or end an extra Nsf2Pst.exe in Task Manager, then try again.")
+        : f.Contains("Wrong Password") ? L("Notes 密碼唔啱（密碼分大小寫）。", "Wrong Notes password (passwords are case sensitive).")
+        : f.Contains("in use by another program") ? L("PST 檔被其他程式使用緊（例如 Outlook），請先關閉 Outlook 或者用 PST 嘅副本。", "The PST is in use by another program (e.g. Outlook). Close Outlook or use a copy of the PST.")
         : f.Contains("not an Outlook data file") ? L("呢個檔案唔係 Outlook 資料檔（PST）。", "This file is not an Outlook data file (PST).")
         : f.Contains("not a Notes database") ? L("呢個檔案唔係 Notes 資料庫（NSF）。", "This file is not a Notes database (NSF).")
         : f.Contains("cannot open the NSF") ? L("開唔到 NSF：檔案可能已損壞，或者而家個 Notes ID 冇權限。", "The NSF cannot be opened: it may be damaged, or this Notes ID has no access.")
@@ -66,7 +71,7 @@ internal sealed class MainForm : Form
     readonly Segmented seg = new(L("NSF → PST", "NSF → PST"), L("PST → NSF", "PST → NSF")) { Name = "segDirection" };
     readonly Label lblHeading = new(), lblSub = new(), lblUpText = new(), lblUpHint = new(), lblOutLabel = new(), lblFoot = new(), lblSubTitle = new();
     readonly Label hintServer = new(), hintUser = new();
-    readonly List<Control> nsfOnly = new();   // advanced rows that only apply to NSF -> PST (directory, ID, password)
+    readonly List<Control> nsfOnly = new();   // advanced rows that only apply to NSF -> PST (directory, owner ID)
     Wordmark wordmark = null!;
     Action layoutDrop = () => { };
 
@@ -349,7 +354,9 @@ internal sealed class MainForm : Form
             "Turns Notes names into email addresses. Pick a copy of names.nsf, or enter \"server name!!names.nsf\"."), txtDir, opt, btnDir));
         Add(L("用邊個人嘅已讀記錄", "Whose read marks to use"), "", txtUser, L("Notes 全名，例如 陳大文/IT/ExampleCorp", "Full Notes name, e.g. John Smith/IT/ExampleCorp"), hintLabel: hintUser);
         nsfOnly.AddRange(Add(L("郵箱主人 Notes ID", "Mailbox owner's Notes ID"), L("只有加密郵件先需要；留空用而家登入嘅 ID。", "Only needed for encrypted mail; leave empty to use the current ID."), txtId, opt, btnId));
-        nsfOnly.AddRange(Add(L("ID 密碼", "ID password"), L("只會傳畀轉換程序，唔會寫入記錄。", "Passed only to the converter process, never written to a log."), txtPwd, opt));
+        // both directions open Notes, so the password row stays visible in PST -> NSF mode too
+        Add(L("Notes 密碼", "Notes password"), L("上面 ID 嘅密碼；冇揀 ID 就係 Notes 而家用緊嘅 ID。Notes 已開住並設定咗唔使問密碼就可以留空。只會傳畀轉換程序，唔會寫入記錄。",
+            "Password of the ID above, or of the ID Notes uses when none is chosen. Leave empty if Notes is running and set not to prompt other programs. Passed only to the converter process, never written to a log."), txtPwd, opt);
         chkAnon.BackColor = Th.Surface; chkAnon.ForeColor = Th.Text; chkAnon.Font = Th.Ui(Th.Body); chkAnon.Margin = new Padding(0, S(2), 0, S(4));
         advGrid.Controls.Add(chkAnon);
         advCard.Dock = DockStyle.Top; advCard.AutoSize = true; advCard.AutoSizeMode = AutoSizeMode.GrowAndShrink;
@@ -899,9 +906,22 @@ internal sealed class MainForm : Form
             StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8,
         };
         foreach (var a in args) psi.ArgumentList.Add(a);
-        if (password != null) psi.Environment["NOTES_ID_PASSWORD"] = password;   // never on the command line
+        // passwords never go on the command line: NOTES_ID_PASSWORD for an ID file (--id), NOTES_PASSWORD for the ID Notes uses
+        if (password != null) psi.Environment["NOTES_ID_PASSWORD"] = password;
+        if (txtPwd.Text.Length > 0) psi.Environment["NOTES_PASSWORD"] = txtPwd.Text;
         var tcs = new TaskCompletionSource<int>();
         var p = new Process { StartInfo = psi, EnableRaisingEvents = true };
+        bool promptSeen = false;
+        DateTime? idLineAt = null;
+        DateTime lastLineAt = DateTime.UtcNow;
+        void PasswordPrompt()
+        {
+            if (promptSeen) return;
+            promptSeen = true;
+            // queued before the kill, so the UI has the reason before it handles the exit
+            BeginInvoke(() => { lastFatal = "Notes asked for a password"; Log("  Notes: Enter password"); });
+            try { p.Kill(true); } catch { }
+        }
         // progress arrives every few items: only the latest value is shown, at most 10 times a second (one repaint instead
         // of one per line); the other lines are rare and go straight to the log
         (int done, int total)? latest = null, shown = null;
@@ -915,11 +935,21 @@ internal sealed class MainForm : Form
             progress.Value = Math.Min(1000, from + (int)((long)(to - from) * v.done / v.total));
             lblStatus.Text = $"{statusBase}{L("（", " (")}{v.done:N0} / {v.total:N0}{L("）", ")")}";
         }
-        pump.Tick += (_, _) => ShowProgress();
+        pump.Tick += (_, _) =>
+        {
+            ShowProgress();
+            // nothing after the ID file line for a while: Notes is waiting at its password prompt
+            if (idLineAt != null && lastLineAt <= idLineAt && DateTime.UtcNow - idLineAt.Value > TimeSpan.FromSeconds(8)) PasswordPrompt();
+        };
         pump.Start();
         void OnLine(string? line)
         {
             if (line == null) return;
+            lastLineAt = DateTime.UtcNow;
+            // with no (or a wrong) password Notes names its ID file, then asks on the console ("Enter password ...:" with
+            // no line end, so that line never arrives) and waits for an answer nobody can give
+            if (line.Contains("The ID file being used is")) idLineAt = DateTime.UtcNow;
+            if (line.Contains("Enter password (press the Esc key to abort)")) { PasswordPrompt(); return; }
             if (IsNoise(line)) return;
             if (line.StartsWith("PROGRESS "))
             {
@@ -948,6 +978,7 @@ internal sealed class MainForm : Form
         child = p;
         Trace($"child {args[0]} start");
         p.Start();
+        ChildJob.Add(p);
         p.BeginOutputReadLine();
         p.BeginErrorReadLine();
         return tcs.Task;
